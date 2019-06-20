@@ -311,11 +311,18 @@ static void request_input_cookie_reply(DBusMessage *reply, void *user_data)
 	char *cookie = NULL, *servercert = NULL, *vpnhost = NULL;
 	char *key;
 	DBusMessageIter iter, dict;
+	int err_int;
 
 	DBG("provider %p", data->provider);
 
-	if (!reply || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR)
-		goto err;
+	err_int = vpn_agent_check_and_process_reply_error(reply, data->provider,
+				data->task, data->cb, data->user_data);
+	if (err_int) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		return;
+	}
 
 	if (!vpn_agent_check_reply_has_dict(reply))
 		goto err;
