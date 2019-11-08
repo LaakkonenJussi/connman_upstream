@@ -1107,6 +1107,12 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 			vpn_provider_indicate_error(provider,
 						VPN_PROVIDER_ERROR_AUTH_FAILED);
 			break;
+		case ENOENT:
+			/*
+			 * No reply, disconnect called by connmand because of
+			 * connection timeout.
+			 */
+			break;
 		case ENOMSG:
 			/* fall through */
 		case ETIMEDOUT:
