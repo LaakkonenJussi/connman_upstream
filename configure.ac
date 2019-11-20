@@ -78,6 +78,8 @@ if (test "${enable_openconnect}" != "no"); then
 		if (test -z "${OPENCONNECT}"); then
 			AC_MSG_ERROR(openconnect binary not found)
 		fi
+		PKG_CHECK_MODULES(LIBOPENCONNECT, openconnect >= 4, [],
+			AC_MSG_ERROR(openconnect >= 4 is required))
 	else
 		OPENCONNECT="${path_openconnect}"
 		AC_SUBST(OPENCONNECT)
