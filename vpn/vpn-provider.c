@@ -503,7 +503,7 @@ static DBusMessage *do_connect(DBusConnection *conn, DBusMessage *msg,
 	DBG("conn %p provider %p", conn, provider);
 
 	err = __vpn_provider_connect(provider, msg);
-	if (err < 0)
+	if (err < 0 && err != -EINPROGRESS)
 		return __connman_error_failed(msg, -err);
 
 	return NULL;
@@ -879,6 +879,9 @@ static int vpn_provider_save(struct vpn_provider *provider)
 
 	reset_error_counters(provider);
 
+	if (provider->state == VPN_PROVIDER_STATE_FAILURE)
+		vpn_provider_set_state(provider, VPN_PROVIDER_STATE_IDLE);
+
 	if (provider->immutable) {
 		/*
 		 * Do not save providers that are provisioned via .config
@@ -1107,6 +1110,12 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 			vpn_provider_indicate_error(provider,
 						VPN_PROVIDER_ERROR_AUTH_FAILED);
 			break;
+		case ENOENT:
+			/*
+			 * No reply, disconnect called by connmand because of
+			 * connection timeout.
+			 */
+			break;
 		case ENOMSG:
 			/* fall through */
 		case ETIMEDOUT:
@@ -1157,6 +1166,7 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 
 int __vpn_provider_connect(struct vpn_provider *provider, DBusMessage *msg)
 {
+	DBusMessage *reply;
 	int err;
 
 	DBG("provider %p state %d", provider, provider->state);
@@ -1169,6 +1179,10 @@ int __vpn_provider_connect(struct vpn_provider *provider, DBusMessage *msg)
 	 * attempt will continue as normal.
 	 */
 	case VPN_PROVIDER_STATE_FAILURE:
+		if (provider->driver && provider->driver->set_state)
+			provider->driver->set_state(provider,
+						VPN_PROVIDER_STATE_IDLE);
+
 		vpn_provider_set_state(provider, VPN_PROVIDER_STATE_IDLE);
 		/* fall through */
 	/*
@@ -1180,6 +1194,15 @@ int __vpn_provider_connect(struct vpn_provider *provider, DBusMessage *msg)
 	 * -EINPROGRESS to indicate that transition is in progress.
 	 */
 	case VPN_PROVIDER_STATE_DISCONNECT:
+		/*
+		 * Failure transition or disconnecting does not yield a
+		 * message to be sent. Send in progress message to avoid
+		 * D-Bus LimitsExceeded error message.
+		 */
+		reply = __connman_error_in_progress(msg);
+		if (reply)
+			g_dbus_send_message(connection, reply);
+
 		return -EINPROGRESS;
 	case VPN_PROVIDER_STATE_UNKNOWN:
 	case VPN_PROVIDER_STATE_IDLE:
@@ -1661,6 +1684,22 @@ int vpn_provider_set_state(struct vpn_provider *provider,
 	return -EINVAL;
 }
 
+void vpn_provider_add_error(struct vpn_provider *provider,
+			enum vpn_provider_error error)
+{
+	switch (error) {
+	case VPN_PROVIDER_ERROR_UNKNOWN:
+		break;
+	case VPN_PROVIDER_ERROR_CONNECT_FAILED:
+		++provider->conn_error_counter;
+		break;
+	case VPN_PROVIDER_ERROR_LOGIN_FAILED:
+	case VPN_PROVIDER_ERROR_AUTH_FAILED:
+		++provider->auth_error_counter;
+		break;
+	}
+}
+
 int vpn_provider_indicate_error(struct vpn_provider *provider,
 					enum vpn_provider_error error)
 {
@@ -1669,18 +1708,7 @@ int vpn_provider_indicate_error(struct vpn_provider *provider,
 
 	vpn_provider_set_state(provider, VPN_PROVIDER_STATE_FAILURE);
 
-	switch (error) {
-	case VPN_PROVIDER_ERROR_UNKNOWN:
-		break;
-	case VPN_PROVIDER_ERROR_CONNECT_FAILED:
-		++provider->conn_error_counter;
-		break;
-
-	case VPN_PROVIDER_ERROR_LOGIN_FAILED:
-	case VPN_PROVIDER_ERROR_AUTH_FAILED:
-		++provider->auth_error_counter;
-		break;
-	}
+	vpn_provider_add_error(provider, error);
 
 	if (provider->driver && provider->driver->set_state)
 		provider->driver->set_state(provider, provider->state);
@@ -2257,7 +2285,7 @@ DBusMessage *__vpn_provider_get_connections(DBusMessage *msg)
 	return reply;
 }
 
-const char *__vpn_provider_get_ident(struct vpn_provider *provider)
+const char *vpn_provider_get_ident(struct vpn_provider *provider)
 {
 	if (!provider)
 		return NULL;

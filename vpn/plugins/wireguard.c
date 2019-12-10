@@ -145,12 +145,14 @@ static int parse_endpoint(const char *host, const char *port, wg_peer *peer)
 
 		close(sk);
 	}
-	freeaddrinfo(result);
 
-	if (!rp)
+	if (!rp) {
+		freeaddrinfo(result);
 		return -EINVAL;
+	}
 
 	memcpy(&peer->endpoint.addr, rp->ai_addr, rp->ai_addrlen);
+	freeaddrinfo(result);
 
 	return 0;
 }
@@ -250,7 +252,7 @@ static int wg_connect(struct vpn_provider *provider,
 	char *ifname;
 	int err = -EINVAL;
 
-	info = g_malloc(sizeof(struct wireguard_info));
+	info = g_malloc0(sizeof(struct wireguard_info));
 	info->peer.flags = WGPEER_HAS_PUBLIC_KEY | WGPEER_REPLACE_ALLOWEDIPS;
 	info->device.flags = WGDEVICE_HAS_PRIVATE_KEY | WGDEVICE_HAS_LISTEN_PORT;
 	info->device.first_peer = &info->peer;
@@ -291,7 +293,7 @@ static int wg_connect(struct vpn_provider *provider,
 	if (err)
 		goto done;
 
-	option = vpn_provider_get_string(provider, "Wireguard.EndpointPort");
+	option = vpn_provider_get_string(provider, "WireGuard.EndpointPort");
 	if (!option)
 		option = "51820";
 
