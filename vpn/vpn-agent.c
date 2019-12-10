@@ -105,6 +105,7 @@ void vpn_agent_append_host_and_name(DBusMessageIter *iter,
 struct user_info_data {
 	struct vpn_provider *provider;
 	const char *username_str;
+	const char *type_str;
 };
 
 static void request_input_append_user_info(DBusMessageIter *iter,
@@ -112,10 +113,10 @@ static void request_input_append_user_info(DBusMessageIter *iter,
 {
 	struct user_info_data *data = user_data;
 	struct vpn_provider *provider = data->provider;
-	const char *str = "string";
+	const char *str = NULL;
 
 	connman_dbus_dict_append_basic(iter, "Type",
-				DBUS_TYPE_STRING, &str);
+				DBUS_TYPE_STRING, &data->type_str);
 	str = "mandatory";
 	connman_dbus_dict_append_basic(iter, "Requirement",
 				DBUS_TYPE_STRING, &str);
@@ -137,14 +138,57 @@ void vpn_agent_append_user_info(DBusMessageIter *iter,
 		.username_str = username_str
 	};
 
+	data.type_str = "string";
 	connman_dbus_dict_append_dict(iter, "Username",
 				request_input_append_user_info,
 				&data);
 
 	data.username_str = NULL;
+	data.type_str = "password";
 	connman_dbus_dict_append_dict(iter, "Password",
 				request_input_append_user_info,
 				&data);
+}
+
+static void request_input_append_flag(DBusMessageIter *iter,
+						void *user_data)
+{
+	dbus_bool_t data = (dbus_bool_t)GPOINTER_TO_INT(user_data);
+	const char *str = NULL;
+
+	str = "boolean";
+	connman_dbus_dict_append_basic(iter, "Type",
+				DBUS_TYPE_STRING, &str);
+
+	str = "control";
+	connman_dbus_dict_append_basic(iter, "Requirement",
+				DBUS_TYPE_STRING, &str);
+
+	connman_dbus_dict_append_basic(iter, "Value",
+				DBUS_TYPE_BOOLEAN, &data);
+}
+
+void vpn_agent_append_allow_credential_storage(DBusMessageIter *iter,
+				bool allow)
+{
+	connman_dbus_dict_append_dict(iter, "AllowStoreCredentials",
+				request_input_append_flag,
+				GINT_TO_POINTER(allow));
+}
+
+void vpn_agent_append_allow_credential_retrieval(DBusMessageIter *iter,
+				bool allow)
+{
+	connman_dbus_dict_append_dict(iter, "AllowRetrieveCredentials",
+				request_input_append_flag,
+				GINT_TO_POINTER(allow));
+}
+
+void vpn_agent_append_keep_credentials(DBusMessageIter *iter, bool allow)
+{
+	connman_dbus_dict_append_dict(iter, "KeepCredentials",
+				request_input_append_flag,
+				GINT_TO_POINTER(allow));
 }
 
 struct failure_data {

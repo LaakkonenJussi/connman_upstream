@@ -1107,6 +1107,12 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 			vpn_provider_indicate_error(provider,
 						VPN_PROVIDER_ERROR_AUTH_FAILED);
 			break;
+		case ENOENT:
+			/*
+			 * No reply, disconnect called by connmand because of
+			 * connection timeout.
+			 */
+			break;
 		case ENOMSG:
 			/* fall through */
 		case ETIMEDOUT:
@@ -1661,6 +1667,22 @@ int vpn_provider_set_state(struct vpn_provider *provider,
 	return -EINVAL;
 }
 
+void vpn_provider_add_error(struct vpn_provider *provider,
+			enum vpn_provider_error error)
+{
+	switch (error) {
+	case VPN_PROVIDER_ERROR_UNKNOWN:
+		break;
+	case VPN_PROVIDER_ERROR_CONNECT_FAILED:
+		++provider->conn_error_counter;
+		break;
+	case VPN_PROVIDER_ERROR_LOGIN_FAILED:
+	case VPN_PROVIDER_ERROR_AUTH_FAILED:
+		++provider->auth_error_counter;
+		break;
+	}
+}
+
 int vpn_provider_indicate_error(struct vpn_provider *provider,
 					enum vpn_provider_error error)
 {
@@ -1669,18 +1691,7 @@ int vpn_provider_indicate_error(struct vpn_provider *provider,
 
 	vpn_provider_set_state(provider, VPN_PROVIDER_STATE_FAILURE);
 
-	switch (error) {
-	case VPN_PROVIDER_ERROR_UNKNOWN:
-		break;
-	case VPN_PROVIDER_ERROR_CONNECT_FAILED:
-		++provider->conn_error_counter;
-		break;
-
-	case VPN_PROVIDER_ERROR_LOGIN_FAILED:
-	case VPN_PROVIDER_ERROR_AUTH_FAILED:
-		++provider->auth_error_counter;
-		break;
-	}
+	vpn_provider_add_error(provider, error);
 
 	if (provider->driver && provider->driver->set_state)
 		provider->driver->set_state(provider, provider->state);
@@ -2257,7 +2268,7 @@ DBusMessage *__vpn_provider_get_connections(DBusMessage *msg)
 	return reply;
 }
 
-const char *__vpn_provider_get_ident(struct vpn_provider *provider)
+const char *vpn_provider_get_ident(struct vpn_provider *provider)
 {
 	if (!provider)
 		return NULL;
