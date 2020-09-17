@@ -45,6 +45,7 @@ static GHashTable *provider_hash;
 static GSList *driver_list;
 static int configuration_count;
 static bool handle_routes;
+static bool default_route_set = false;
 
 struct vpn_route {
 	int family;
@@ -71,6 +72,7 @@ struct vpn_provider {
 	char *host;
 	char *domain;
 	int family;
+	bool do_split_routing;
 	GHashTable *routes;
 	struct vpn_provider_driver *driver;
 	void *driver_data;
@@ -114,6 +116,24 @@ static void free_setting(gpointer data)
 
 	g_free(setting->value);
 	g_free(setting);
+}
+
+#define BOOLSTR_TRUE "true"
+#define BOOLSTR_FALSE "false"
+
+static const char *bool2str(bool value)
+{
+	return value ? BOOLSTR_TRUE : BOOLSTR_FALSE;
+}
+
+static bool provider_is_split_routing(struct vpn_provider *provider)
+{
+	if (!provider)
+		return false;
+
+	DBG("%s", bool2str(provider->do_split_routing));
+
+	return provider->do_split_routing;
 }
 
 static void append_route(DBusMessageIter *iter, void *user_data)
@@ -404,6 +424,16 @@ static void send_value(const char *path, const char *key, const char *value)
 					&str);
 }
 
+static void send_value_boolean(const char *path, const char *key,
+							dbus_bool_t value)
+{
+	connman_dbus_property_changed_basic(path,
+					VPN_CONNECTION_INTERFACE,
+					key,
+					DBUS_TYPE_BOOLEAN,
+					&value);
+}
+
 static gboolean provider_send_changed(gpointer data)
 {
 	struct vpn_provider *provider = data;
@@ -504,6 +534,16 @@ static int set_provider_property(struct vpn_provider *provider,
 		if (!handle_routes)
 			send_routes(provider, provider->user_routes,
 						"UserRoutes");
+	} else if (g_str_equal(name, "SplitRouting")) {
+		dbus_bool_t split_routing;
+
+		if (type != DBUS_TYPE_BOOLEAN)
+			return -EINVAL;
+
+		dbus_message_iter_get_basic(value, &split_routing);
+
+		DBG("property %s value %s ", name, bool2str(split_routing));
+		vpn_provider_set_boolean(provider, name, split_routing);
 	} else {
 		const char *str;
 
@@ -576,8 +616,13 @@ static DBusMessage *set_properties(DBusMessageIter *iter, DBusMessage *msg,
 		dbus_message_iter_recurse(&entry, &value);
 
 		type = dbus_message_iter_get_arg_type(&value);
-		/* Ignore and report back all invalid property types */
-		if (type != DBUS_TYPE_STRING && type != DBUS_TYPE_ARRAY) {
+		switch (type) {
+		case DBUS_TYPE_STRING:
+		case DBUS_TYPE_ARRAY:
+		case DBUS_TYPE_BOOLEAN:
+			break;
+		default:
+			/* Ignore and report back all invalid property types */
 			invalid = append_to_gstring(invalid, key);
 			continue;
 		}
@@ -841,6 +886,8 @@ static void provider_resolv_host_addr(struct vpn_provider *provider)
 void __vpn_provider_append_properties(struct vpn_provider *provider,
 							DBusMessageIter *iter)
 {
+	dbus_bool_t split_routing;
+
 	if (provider->host)
 		connman_dbus_dict_append_basic(iter, "Host",
 					DBUS_TYPE_STRING, &provider->host);
@@ -852,6 +899,10 @@ void __vpn_provider_append_properties(struct vpn_provider *provider,
 	if (provider->type)
 		connman_dbus_dict_append_basic(iter, "Type", DBUS_TYPE_STRING,
 						 &provider->type);
+
+	split_routing = provider->do_split_routing;
+	connman_dbus_dict_append_basic(iter, "SplitRouting", DBUS_TYPE_BOOLEAN,
+							&split_routing);
 }
 
 int __vpn_provider_append_user_route(struct vpn_provider *provider,
@@ -984,7 +1035,7 @@ static GSList *get_routes(gchar **networks)
 static int provider_load_from_keyfile(struct vpn_provider *provider,
 		GKeyFile *keyfile)
 {
-	gsize idx = 0;
+	gsize idx;
 	gchar **settings;
 	gchar *key, *value;
 	gsize length, num_user_networks;
@@ -997,28 +1048,32 @@ static int provider_load_from_keyfile(struct vpn_provider *provider,
 		return -ENOENT;
 	}
 
-	while (idx < length) {
+	for (idx = 0; idx < length; idx++) {
 		key = settings[idx];
-		if (key) {
-			if (g_str_equal(key, "Networks")) {
-				networks = __vpn_config_get_string_list(keyfile,
-						provider->identifier,
-						key,
-						&num_user_networks,
-						NULL);
-				provider->user_networks = get_routes(networks);
+		if (!key)
+			continue;
 
-			} else {
-				value = __vpn_config_get_string(keyfile,
-							provider->identifier,
-							key, NULL);
-				vpn_provider_set_string(provider, key,
-							value);
-				g_free(value);
-			}
+		if (g_str_equal(key, "Networks")) {
+			networks = __vpn_config_get_string_list(keyfile,
+						provider->identifier,key,
+						&num_user_networks, NULL);
+			provider->user_networks = get_routes(networks);
+		} else if (g_str_equal(key, "SplitRouting")) {
+			bool value = __vpn_config_get_boolean(keyfile,
+						provider->identifier, key,
+						false);
+			vpn_provider_set_boolean(provider, key, value);
+			DBG("%s SplitRouting %s", provider->identifier,
+						bool2str(value));
+		} else {
+			value = __vpn_config_get_string(keyfile,
+						provider->identifier, key,
+						NULL);
+			vpn_provider_set_string(provider, key, value);
+			g_free(value);
 		}
-		idx += 1;
 	}
+
 	g_strfreev(settings);
 	g_strfreev(networks);
 
@@ -1135,6 +1190,9 @@ static int vpn_provider_save(struct vpn_provider *provider)
 			"Host", provider->host);
 	g_key_file_set_string(keyfile, provider->identifier,
 			"VPN.Domain", provider->domain);
+	g_key_file_set_boolean(keyfile, provider->identifier,
+			"SplitRouting", provider->do_split_routing);
+
 	if (provider->user_networks) {
 		gchar **networks;
 		gsize network_count;
@@ -1725,6 +1783,7 @@ static void append_properties(DBusMessageIter *iter,
 	GHashTableIter hash;
 	gpointer value, key;
 	dbus_bool_t immutable;
+	dbus_bool_t split_routing;
 
 	connman_dbus_dict_open(iter, &dict);
 
@@ -1752,6 +1811,10 @@ static void append_properties(DBusMessageIter *iter,
 	connman_dbus_dict_append_basic(&dict, "Immutable", DBUS_TYPE_BOOLEAN,
 					&immutable);
 
+	split_routing = provider->do_split_routing;
+	connman_dbus_dict_append_basic(&dict, "SplitRouting",
+					DBUS_TYPE_BOOLEAN, &split_routing);
+
 	if (provider->family == AF_INET)
 		connman_dbus_dict_append_dict(&dict, "IPv4", append_ipv4,
 						provider);
@@ -1776,8 +1839,7 @@ static void append_properties(DBusMessageIter *iter,
 		while (g_hash_table_iter_next(&hash, &key, &value)) {
 			struct vpn_setting *setting = value;
 
-			if (!setting->hide_value &&
-							setting->value)
+			if (!setting->hide_value && setting->value)
 				connman_dbus_dict_append_basic(&dict, key,
 							DBUS_TYPE_STRING,
 							&setting->value);
@@ -1842,6 +1904,21 @@ static void provider_append_routes(gpointer key, gpointer value,
 		return;
 	}
 
+	/*
+	 * Default route is being added only when network and netmask are
+	 * INADDR_ANY and gateway is NULL. Split routed providers do not have
+	 * a default route set.
+	 */
+	if (__connman_inet_is_any_addr(route->network, provider->family) &&
+				__connman_inet_is_any_addr(
+					route->netmask, provider->family) &&
+				!route->gateway) {
+		if (provider_is_split_routing(provider))
+			return;
+
+		default_route_set = true;
+	}
+
 	if (route->family == AF_INET6) {
 		unsigned char prefix_len = atoi(route->netmask);
 
@@ -1859,9 +1936,13 @@ static int set_connected(struct vpn_provider *provider,
 					bool connected)
 {
 	struct vpn_ipconfig *ipconfig;
+	const gchar *ipaddr_any = provider->family == AF_INET6 ?
+							"::" : "0.0.0.0";
 
 	DBG("provider %p id %s connected %d", provider,
 					provider->identifier, connected);
+
+	default_route_set = false;
 
 	if (connected) {
 		if (provider->family == AF_INET6)
@@ -1883,6 +1964,28 @@ static int set_connected(struct vpn_provider *provider,
 		g_hash_table_foreach(provider->user_routes,
 					provider_append_routes, provider);
 
+		/*
+		 * This is for cases when the VPN should be the default route
+		 * but the default route is not provided in the routes.
+		 *
+		 * Do not set default route if the provider is set to be split
+		 * routed or default route has been already set.
+		*/
+		if (provider_is_split_routing(provider) || default_route_set)
+			return 0;
+
+		DBG("Adding default route for provider %p", provider);
+
+		/*
+		 * In routing IPv6 any (::) address prefix is 0
+		 * http://www.tldp.org/HOWTO/Linux+IPv6-HOWTO/
+		 */
+		if (provider->family == AF_INET6)
+			connman_inet_add_ipv6_network_route(provider->index,
+						ipaddr_any, NULL, 0);
+		else
+			connman_inet_add_network_route(provider->index,
+						ipaddr_any, NULL, ipaddr_any);
 	} else {
 		provider_indicate_state(provider,
 					VPN_PROVIDER_STATE_DISCONNECT);
@@ -2017,6 +2120,7 @@ static void provider_initialize(struct vpn_provider *provider)
 	provider->domain = NULL;
 	provider->identifier = NULL;
 	provider->immutable = false;
+	provider->do_split_routing = false;
 	provider->user_networks = NULL;
 	provider->routes = g_hash_table_new_full(g_direct_hash, g_direct_equal,
 					NULL, free_route);
@@ -2185,6 +2289,7 @@ int __vpn_provider_create(DBusMessage *msg)
 	GSList *networks = NULL;
 	char *ident;
 	int err;
+	dbus_bool_t split_routing = false;
 
 	dbus_message_iter_init(msg, &iter);
 	dbus_message_iter_recurse(&iter, &array);
@@ -2210,6 +2315,11 @@ int __vpn_provider_create(DBusMessage *msg)
 			else if (g_str_equal(key, "VPN.Domain") ||
 					g_str_equal(key, "Domain"))
 				dbus_message_iter_get_basic(&value, &domain);
+			break;
+		case DBUS_TYPE_BOOLEAN:
+			if (g_str_equal(key, "SplitRouting"))
+				dbus_message_iter_get_basic(&value,
+							&split_routing);
 			break;
 		case DBUS_TYPE_ARRAY:
 			if (g_str_equal(key, "UserRoutes"))
@@ -2244,6 +2354,7 @@ int __vpn_provider_create(DBusMessage *msg)
 		provider->domain = g_strdup(domain);
 		provider->name = g_strdup(name);
 		provider->type = g_strdup(type);
+		provider->do_split_routing = split_routing;
 
 		if (provider_register(provider) == 0)
 			vpn_provider_load(provider);
@@ -2392,6 +2503,7 @@ int __vpn_provider_create_from_config(GHashTable *settings,
 {
 	struct vpn_provider *provider;
 	const char *type, *name, *host, *domain, *networks_str;
+	bool split_routing;
 	GSList *networks;
 	char *ident = NULL;
 	GHashTableIter hash;
@@ -2404,6 +2516,8 @@ int __vpn_provider_create_from_config(GHashTable *settings,
 	domain = get_string(settings, "Domain");
 	networks_str = get_string(settings, "Networks");
 	networks = parse_user_networks(networks_str);
+	split_routing = !g_strcmp0(get_string(settings, "SplitRouting"),
+								"true");
 
 	if (!host) {
 		err = -EINVAL;
@@ -2433,6 +2547,7 @@ int __vpn_provider_create_from_config(GHashTable *settings,
 		provider->domain = g_strdup(domain);
 		provider->name = g_strdup(name);
 		provider->type = g_ascii_strdown(type, -1);
+		provider->do_split_routing = split_routing;
 
 		provider->config_file = g_strdup(config_ident);
 		provider->config_entry = g_strdup(config_entry);
@@ -2564,6 +2679,10 @@ static int set_string(struct vpn_provider *provider,
 		g_free(provider->domain);
 		provider->domain = g_strdup(value);
 		send_value(provider->path, "Domain", provider->domain);
+	} else if (g_str_equal(key, "SplitRouting")) {
+		connman_warn("VPN SplitRouting value attempted to set as "
+					"string, is boolean");
+		return -EINVAL;
 	} else {
 		struct vpn_setting *setting;
 		bool replace = true;
@@ -2648,6 +2767,23 @@ const char *vpn_provider_get_string(struct vpn_provider *provider,
 		return NULL;
 
 	return setting->value;
+}
+
+int vpn_provider_set_boolean(struct vpn_provider *provider, const char *key,
+							bool value)
+{
+	if (g_str_equal(key, "SplitRouting")) {
+		if (provider->do_split_routing == value)
+			return -EALREADY;
+
+		DBG("SplitRouting set to %s", bool2str(value));
+
+		provider->do_split_routing = value;
+		send_value_boolean(provider->path, key,
+					provider->do_split_routing);
+	}
+
+	return 0;
 }
 
 bool vpn_provider_get_boolean(struct vpn_provider *provider, const char *key,
