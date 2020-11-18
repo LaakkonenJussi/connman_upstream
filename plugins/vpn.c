@@ -412,7 +412,7 @@ static int extract_ip(DBusMessageIter *array, int family,
 	}
 
 	connman_ipaddress_free(data->ip);
-	data->ip = connman_ipaddress_alloc(family);
+	data->ip = connman_ipaddress_alloc(family, true);
 	if (!data->ip)
 		return -ENOMEM;
 

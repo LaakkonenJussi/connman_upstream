@@ -235,7 +235,7 @@ static int vc_notify(DBusMessage *msg, struct vpn_provider *provider)
 	}
 
 
-	ipaddress = connman_ipaddress_alloc(AF_INET);
+	ipaddress = connman_ipaddress_alloc(AF_INET, true);
 	if (!ipaddress) {
 		g_free(address);
 		g_free(netmask);

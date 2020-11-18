@@ -335,9 +335,9 @@ static int oc_notify(DBusMessage *msg, struct vpn_provider *provider)
 	DBG("%p %p", addressv4, addressv6);
 
 	if (addressv4)
-		ipaddress = connman_ipaddress_alloc(AF_INET);
+		ipaddress = connman_ipaddress_alloc(AF_INET, true);
 	else if (addressv6)
-		ipaddress = connman_ipaddress_alloc(AF_INET6);
+		ipaddress = connman_ipaddress_alloc(AF_INET6, true);
 	else
 		ipaddress = NULL;
 

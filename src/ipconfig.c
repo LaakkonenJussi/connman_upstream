@@ -696,6 +696,27 @@ static inline gint check_duplicate_address(gconstpointer a, gconstpointer b)
 	return g_strcmp0(addr1->local, addr2->local);
 }
 
+
+static bool is_index_p2p_service(int index)
+{
+	struct connman_service *service;
+	enum connman_service_type type;
+
+	service = __connman_service_lookup_from_index(index);
+	if (!service)
+		return false;
+
+	type = connman_service_get_type(service);
+	switch (type) {
+	case CONNMAN_SERVICE_TYPE_P2P:
+	case CONNMAN_SERVICE_TYPE_VPN:
+		return true;
+	default:
+		return false;
+	}
+}
+
+
 int __connman_ipconfig_newaddr(int index, int family, const char *label,
 				unsigned char prefixlen, const char *address)
 {
@@ -704,6 +725,7 @@ int __connman_ipconfig_newaddr(int index, int family, const char *label,
 	enum connman_ipconfig_type type;
 	GList *list;
 	char *ifname;
+	bool is_p2p;
 
 	DBG("index %d", index);
 
@@ -711,7 +733,8 @@ int __connman_ipconfig_newaddr(int index, int family, const char *label,
 	if (!ipdevice)
 		return -ENXIO;
 
-	ipaddress = connman_ipaddress_alloc(family);
+	is_p2p = is_index_p2p_service(index);
+	ipaddress = connman_ipaddress_alloc(family, is_p2p);
 	if (!ipaddress)
 		return -ENOMEM;
 
@@ -1190,6 +1213,7 @@ static struct connman_ipconfig *create_ipv6config(int index)
 {
 	struct connman_ipconfig *ipv6config;
 	struct connman_ipdevice *ipdevice;
+	bool is_p2p;
 
 	ipv6config = g_try_new0(struct connman_ipconfig, 1);
 	if (!ipv6config)
@@ -1199,6 +1223,7 @@ static struct connman_ipconfig *create_ipv6config(int index)
 
 	ipv6config->index = index;
 	ipv6config->type = CONNMAN_IPCONFIG_TYPE_IPV6;
+	is_p2p = is_index_p2p_service(index);
 
 	if (!is_ipv6_supported)
 		ipv6config->method = CONNMAN_IPCONFIG_METHOD_OFF;
@@ -1209,13 +1234,13 @@ static struct connman_ipconfig *create_ipv6config(int index)
 	if (ipdevice)
 		ipv6config->ipv6_privacy_config = ipdevice->ipv6_privacy;
 
-	ipv6config->address = connman_ipaddress_alloc(AF_INET6);
+	ipv6config->address = connman_ipaddress_alloc(AF_INET6, is_p2p);
 	if (!ipv6config->address) {
 		g_free(ipv6config);
 		return NULL;
 	}
 
-	ipv6config->system = connman_ipaddress_alloc(AF_INET6);
+	ipv6config->system = connman_ipaddress_alloc(AF_INET6, is_p2p);
 
 	DBG("ipconfig %p index %d method %s", ipv6config, index,
 		__connman_ipconfig_method2string(ipv6config->method));
@@ -1234,6 +1259,7 @@ struct connman_ipconfig *__connman_ipconfig_create(int index,
 					enum connman_ipconfig_type type)
 {
 	struct connman_ipconfig *ipconfig;
+	bool is_p2p;
 
 	if (type == CONNMAN_IPCONFIG_TYPE_IPV6)
 		return create_ipv6config(index);
@@ -1246,14 +1272,15 @@ struct connman_ipconfig *__connman_ipconfig_create(int index,
 
 	ipconfig->index = index;
 	ipconfig->type = CONNMAN_IPCONFIG_TYPE_IPV4;
+	is_p2p = is_index_p2p_service(index);
 
-	ipconfig->address = connman_ipaddress_alloc(AF_INET);
+	ipconfig->address = connman_ipaddress_alloc(AF_INET, is_p2p);
 	if (!ipconfig->address) {
 		g_free(ipconfig);
 		return NULL;
 	}
 
-	ipconfig->system = connman_ipaddress_alloc(AF_INET);
+	ipconfig->system = connman_ipaddress_alloc(AF_INET, is_p2p);
 
 	DBG("ipconfig %p index %d", ipconfig, index);
 
@@ -1451,10 +1478,8 @@ int __connman_ipconfig_address_unset(struct connman_ipconfig *ipconfig)
 			err = connman_inet_clear_address(ipconfig->index,
 							ipconfig->address);
 		else if (ipconfig->type == CONNMAN_IPCONFIG_TYPE_IPV6)
-			err = connman_inet_clear_ipv6_address(
-						ipconfig->index,
-						ipconfig->address->local,
-						ipconfig->address->prefixlen);
+			err = connman_inet_clear_ipv6_address(ipconfig->index,
+							ipconfig->address);
 		else
 			err = -EINVAL;
 

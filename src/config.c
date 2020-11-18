@@ -1318,7 +1318,7 @@ static int try_provision_service(struct connman_config_service *config,
 			return -EINVAL;
 		}
 
-		address = connman_ipaddress_alloc(AF_INET6);
+		address = connman_ipaddress_alloc(AF_INET6, false);
 		if (!address)
 			return -ENOENT;
 
@@ -1363,7 +1363,7 @@ static int try_provision_service(struct connman_config_service *config,
 			return -EINVAL;
 		}
 
-		address = connman_ipaddress_alloc(AF_INET);
+		address = connman_ipaddress_alloc(AF_INET, false);
 		if (!address)
 			return -ENOENT;
 

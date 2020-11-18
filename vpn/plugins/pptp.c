@@ -185,7 +185,7 @@ static int pptp_notify(DBusMessage *msg, struct vpn_provider *provider)
 	}
 
 	if (addressv4)
-		ipaddress = connman_ipaddress_alloc(AF_INET);
+		ipaddress = connman_ipaddress_alloc(AF_INET, true);
 
 	g_free(ifname);
 

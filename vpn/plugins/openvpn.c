@@ -279,7 +279,7 @@ static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
 		dbus_message_iter_next(&dict);
 	}
 
-	ipaddress = connman_ipaddress_alloc(AF_INET);
+	ipaddress = connman_ipaddress_alloc(AF_INET, true);
 	if (!ipaddress) {
 		g_slist_free_full(nameserver_list, free_ns_entry);
 		g_free(address);

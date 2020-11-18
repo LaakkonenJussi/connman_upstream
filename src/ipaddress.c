@@ -56,7 +56,7 @@ unsigned char connman_ipaddress_calc_netmask_len(const char *netmask)
 	return bits;
 }
 
-struct connman_ipaddress *connman_ipaddress_alloc(int family)
+struct connman_ipaddress *connman_ipaddress_alloc(int family, bool is_p2p)
 {
 	struct connman_ipaddress *ipaddress;
 
@@ -70,6 +70,7 @@ struct connman_ipaddress *connman_ipaddress_alloc(int family)
 	ipaddress->peer = NULL;
 	ipaddress->broadcast = NULL;
 	ipaddress->gateway = NULL;
+	ipaddress->is_p2p = is_p2p;
 
 	return ipaddress;
 }
@@ -223,6 +224,7 @@ connman_ipaddress_copy(struct connman_ipaddress *ipaddress)
 	copy->peer = g_strdup(ipaddress->peer);
 	copy->broadcast = g_strdup(ipaddress->broadcast);
 	copy->gateway = g_strdup(ipaddress->gateway);
+	copy->is_p2p = ipaddress->is_p2p;
 
 	return copy;
 }
