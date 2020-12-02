@@ -96,7 +96,7 @@ int __vpn_provider_disconnect(struct vpn_provider *provider);
 int __vpn_provider_remove(const char *path);
 int __vpn_provider_delete(struct vpn_provider *provider);
 void __vpn_provider_cleanup(void);
-int __vpn_provider_init(bool handle_routes);
+int __vpn_provider_init();
 
 #include "vpn-rtnl.h"
 
@@ -111,10 +111,12 @@ int __vpn_rtnl_send(const void *buf, size_t len);
 
 int __vpn_config_init(void);
 void __vpn_config_cleanup(void);
-char *__vpn_config_get_string(GKeyFile *key_file,
-        const char *group_name, const char *key, GError **error);
-char **__vpn_config_get_string_list(GKeyFile *key_file,
-        const char *group_name, const char *key, gsize *length, GError **error);
+char *__vpn_config_get_string(GKeyFile *key_file, const char *group_name,
+					const char *key, GError **error);
+char **__vpn_config_get_string_list(GKeyFile *key_file, const char *group_name,
+			const char *key, gsize *length, GError **error);
+bool __vpn_config_get_boolean(GKeyFile *key_file, const char *group_name,
+			const char *key, bool default_value);
 
 int __vpn_settings_init(const char *file);
 void __vpn_settings_cleanup(void);

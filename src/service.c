@@ -367,7 +367,26 @@ static enum connman_service_proxy_method string2proxymethod(const char *method)
 		return CONNMAN_SERVICE_PROXY_METHOD_UNKNOWN;
 }
 
-static void set_split_routing(struct connman_service *service, bool value)
+void __connman_service_split_routing_changed(struct connman_service *service)
+{
+	dbus_bool_t split_routing;
+
+	if (!service->path)
+		return;
+
+	if (!allow_property_changed(service))
+		return;
+
+	split_routing = service->do_split_routing;
+	if (!connman_dbus_property_changed_basic(service->path,
+				CONNMAN_SERVICE_INTERFACE, "SplitRouting",
+					DBUS_TYPE_BOOLEAN, &split_routing))
+		connman_warn("cannot send SplitRouting property change on %s",
+					service->identifier);
+}
+
+void __connman_service_set_split_routing(struct connman_service *service,
+								bool value)
 {
 	if (service->type != CONNMAN_SERVICE_TYPE_VPN)
 		return;
@@ -378,6 +397,12 @@ static void set_split_routing(struct connman_service *service, bool value)
 		service->order = 0;
 	else
 		service->order = 10;
+
+	/*
+	 * In order to make sure the value is propagated also when loading the
+	 * VPN service signal the value regardless of the value change.
+	 */
+	__connman_service_split_routing_changed(service);
 }
 
 int __connman_service_load_modifiable(struct connman_service *service)
@@ -400,9 +425,10 @@ int __connman_service_load_modifiable(struct connman_service *service)
 	case CONNMAN_SERVICE_TYPE_P2P:
 		break;
 	case CONNMAN_SERVICE_TYPE_VPN:
-		set_split_routing(service, g_key_file_get_boolean(keyfile,
-							service->identifier,
-							"SplitRouting", NULL));
+		__connman_service_set_split_routing(service,
+						g_key_file_get_boolean(keyfile,
+						service->identifier,
+						"SplitRouting", NULL));
 
 		/* fall through */
 	case CONNMAN_SERVICE_TYPE_WIFI:
@@ -456,9 +482,10 @@ static int service_load(struct connman_service *service)
 	case CONNMAN_SERVICE_TYPE_P2P:
 		break;
 	case CONNMAN_SERVICE_TYPE_VPN:
-		set_split_routing(service, g_key_file_get_boolean(keyfile,
-							service->identifier,
-							"SplitRouting", NULL));
+		__connman_service_set_split_routing(service,
+						g_key_file_get_boolean(keyfile,
+						service->identifier,
+						"SplitRouting", NULL));
 
 		autoconnect = g_key_file_get_boolean(keyfile,
 				service->identifier, "AutoConnect", &error);
@@ -4764,27 +4791,22 @@ static void service_schedule_changed(void)
 	services_notify->id = g_timeout_add(100, service_send_changed, NULL);
 }
 
-static DBusMessage *move_service(DBusConnection *conn,
-					DBusMessage *msg, void *user_data,
-								bool before)
+int __connman_service_move(struct connman_service *service,
+				struct connman_service *target, bool before)
 {
-	struct connman_service *service = user_data;
-	struct connman_service *target;
-	const char *path;
 	enum connman_ipconfig_method target4, target6;
 	enum connman_ipconfig_method service4, service6;
 
 	DBG("service %p", service);
 
-	dbus_message_get_args(msg, NULL, DBUS_TYPE_OBJECT_PATH, &path,
-							DBUS_TYPE_INVALID);
+	if (!service)
+		return -EINVAL;
 
 	if (!service->favorite)
-		return __connman_error_not_supported(msg);
+		return -EOPNOTSUPP;
 
-	target = find_service(path);
 	if (!target || !target->favorite || target == service)
-		return __connman_error_invalid_service(msg);
+		return -EINVAL;
 
 	if (target->type == CONNMAN_SERVICE_TYPE_VPN) {
 		/*
@@ -4795,14 +4817,14 @@ static DBusMessage *move_service(DBusConnection *conn,
 			connman_info("Cannot move service. "
 				"No routes defined for provider %s",
 				__connman_provider_get_ident(target->provider));
-			return __connman_error_invalid_service(msg);
+			return -EINVAL;
 		}
 
-		set_split_routing(target, true);
+		__connman_service_set_split_routing(target, true);
 	} else
-		set_split_routing(target, false);
+		__connman_service_set_split_routing(target, false);
 
-	set_split_routing(service, false);
+	__connman_service_set_split_routing(service, false);
 
 	target4 = __connman_ipconfig_get_method(target->ipconfig_ipv4);
 	target6 = __connman_ipconfig_get_method(target->ipconfig_ipv6);
@@ -4825,7 +4847,7 @@ static DBusMessage *move_service(DBusConnection *conn,
 		if (service6 != CONNMAN_IPCONFIG_METHOD_OFF) {
 			if (!check_suitable_state(target->state_ipv6,
 							service->state_ipv6))
-				return __connman_error_invalid_service(msg);
+				return -EINVAL;
 		}
 	}
 
@@ -4833,7 +4855,7 @@ static DBusMessage *move_service(DBusConnection *conn,
 		if (service4 != CONNMAN_IPCONFIG_METHOD_OFF) {
 			if (!check_suitable_state(target->state_ipv4,
 							service->state_ipv4))
-				return __connman_error_invalid_service(msg);
+				return -EINVAL;
 		}
 	}
 
@@ -4841,7 +4863,7 @@ static DBusMessage *move_service(DBusConnection *conn,
 		if (target6 != CONNMAN_IPCONFIG_METHOD_OFF) {
 			if (!check_suitable_state(target->state_ipv6,
 							service->state_ipv6))
-				return __connman_error_invalid_service(msg);
+				return -EINVAL;
 		}
 	}
 
@@ -4849,7 +4871,7 @@ static DBusMessage *move_service(DBusConnection *conn,
 		if (target4 != CONNMAN_IPCONFIG_METHOD_OFF) {
 			if (!check_suitable_state(target->state_ipv4,
 							service->state_ipv4))
-				return __connman_error_invalid_service(msg);
+				return -EINVAL;
 		}
 	}
 
@@ -4871,6 +4893,39 @@ static DBusMessage *move_service(DBusConnection *conn,
 	__connman_connection_update_gateway();
 
 	service_schedule_changed();
+
+	return 0;
+}
+
+static DBusMessage *move_service(DBusConnection *conn,
+					DBusMessage *msg, void *user_data,
+								bool before)
+{
+	struct connman_service *service = user_data;
+	struct connman_service *target;
+	const char *path;
+	int err;
+
+	DBG("service %p", service);
+
+	dbus_message_get_args(msg, NULL, DBUS_TYPE_OBJECT_PATH, &path,
+							DBUS_TYPE_INVALID);
+
+	target = find_service(path);
+
+	err = __connman_service_move(service, target, before);
+	switch (err) {
+	case 0:
+		break;
+	case -EINVAL:
+		return __connman_error_invalid_service(msg);
+	case -EOPNOTSUPP:
+		return __connman_error_not_supported(msg);
+	default:
+		connman_warn("unsupported error code %d in move_service()",
+									err);
+		break;
+	}
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
@@ -6812,13 +6867,13 @@ static int service_register(struct connman_service *service)
 
 	DBG("path %s", service->path);
 
-	if (__connman_config_provision_service(service) < 0)
-		service_load(service);
-
 	g_dbus_register_interface(connection, service->path,
 					CONNMAN_SERVICE_INTERFACE,
 					service_methods, service_signals,
 							NULL, service, NULL);
+
+	if (__connman_config_provision_service(service) < 0)
+		service_load(service);
 
 	service_list_sort();
 
