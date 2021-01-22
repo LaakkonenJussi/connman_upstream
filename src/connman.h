@@ -341,7 +341,12 @@ void __connman_ipconfig_set_ops(struct connman_ipconfig *ipconfig,
 int __connman_ipconfig_set_method(struct connman_ipconfig *ipconfig,
 					enum connman_ipconfig_method method);
 void __connman_ipconfig_disable_ipv6(struct connman_ipconfig *ipconfig);
-void __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig);
+int __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_set_force_disabled_ipv6(
+					struct connman_ipconfig *ipconfig,
+					bool force_disabled);
+int __connman_ipconfig_set_ipv6_support(bool enable);
+bool __connman_ipconfig_get_ipv6_support();
 
 int __connman_ipconfig_init(void);
 void __connman_ipconfig_cleanup(void);
@@ -406,6 +411,8 @@ void __connman_ipconfig_append_ethernet(struct connman_ipconfig *ipconfig,
 							DBusMessageIter *iter);
 enum connman_ipconfig_method __connman_ipconfig_get_method(
 				struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_ipv6_method_save(struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_ipv6_method_restore(struct connman_ipconfig *ipconfig);
 
 int __connman_ipconfig_address_add(struct connman_ipconfig *ipconfig);
 int __connman_ipconfig_address_remove(struct connman_ipconfig *ipconfig);
