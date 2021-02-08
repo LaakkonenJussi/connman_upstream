@@ -121,10 +121,127 @@ void connman_provider_unref_debug(struct connman_provider *provider,
 	provider_destruct(provider);
 }
 
+static bool ipv6_change_running = false;
+
+int __connman_provider_set_ipv6_for_connected(
+				struct connman_provider *provider, bool enable)
+{
+	struct connman_service *service;
+	struct connman_service *transport;
+	struct connman_ipconfig *ipconfig;
+	enum connman_service_state state;
+	const char *transport_ident;
+	bool single_connected_tech;
+
+	if (ipv6_change_running)
+		return -EALREADY;
+
+	if (!provider)
+		return -EINVAL;
+
+	DBG("provider %p %s", provider, enable ? "enable" : "disable");
+
+	service = provider->vpn_service;
+	if (!service)
+		return -EINVAL;
+
+	/*
+	 * Allow only when the VPN service is in ready state, service state
+	 * is changed to ready before provider when connecting and changed
+	 * away from ready after provider state is changed.
+	 */
+	state = connman_service_get_state(service);
+	if (state != CONNMAN_SERVICE_STATE_READY)
+		return 0;
+
+	/*
+	 * If a VPN changes from non-split routed to split routed then IPv6 on
+	 * the transport must be re-enabled.
+	 */
+	if (__connman_service_is_split_routing(service) && !enable)
+		return 0;
+
+	ipconfig = __connman_service_get_ip6config(service);
+	if (__connman_ipconfig_ipv6_is_enabled(ipconfig))
+		return 0;
+
+	single_connected_tech =
+			connman_setting_get_bool("SingleConnectedTechnology");
+
+	/* If re-enabling IPv6 set the internal status prior to enabling IPv6
+	 * for connected servises to allow the IPv6 ipconfig enabled check to
+	 * return correct value.
+	 */
+	if (enable && !single_connected_tech)
+		__connman_ipconfig_set_ipv6_support(enable);
+
+	transport_ident = __connman_provider_get_transport_ident(provider);
+	transport = connman_service_lookup_from_identifier(transport_ident);
+
+	/* In case a sevice of same type that the current transport is changed
+	 * to use another, e.g., WiFi AP, then the service is first
+	 * disconnected which in turn calls provider_indicate_state() when
+	 * provider is being disconnected and this function gets called. In
+	 * such case another call to provider_indicate_state() can be made
+	 * while traversing through the services list with
+	 * __connman_service_set_ipv6_for_connected() to disconnect this
+	 * provider. Therefore, using this boolean can prevent a loop within
+	 * loop from being executed.
+	 */
+	ipv6_change_running = true;
+
+	/* Set IPv6 for connected, excluding VPN and include transport. */
+	__connman_service_set_ipv6_for_connected(service, transport, enable);
+
+	/*
+	 * Disable internal IPv6 use after disabling IPv6 for the connected
+	 * services to allow IPv6 enabled check to work.
+	 */
+	if (!enable && !single_connected_tech)
+		__connman_ipconfig_set_ipv6_support(enable);
+
+	ipv6_change_running = false;
+
+	return 0;
+}
+
 static int provider_indicate_state(struct connman_provider *provider,
 					enum connman_service_state state)
 {
+	int err;
+
 	DBG("state %d", state);
+
+	switch (state) {
+	case CONNMAN_SERVICE_STATE_UNKNOWN:
+	case CONNMAN_SERVICE_STATE_IDLE:
+	case CONNMAN_SERVICE_STATE_ASSOCIATION:
+	case CONNMAN_SERVICE_STATE_CONFIGURATION:
+		break;
+	case CONNMAN_SERVICE_STATE_READY:
+	case CONNMAN_SERVICE_STATE_ONLINE:
+		if (provider->family != AF_INET)
+			break;
+
+		err = __connman_provider_set_ipv6_for_connected(provider,
+									false);
+		if (err && err != -EALREADY)
+			DBG("cannot disable IPv6 on provider %p transport",
+								provider);
+		break;
+	case CONNMAN_SERVICE_STATE_DISCONNECT:
+	case CONNMAN_SERVICE_STATE_FAILURE:
+		if (provider->family != AF_INET)
+			break;
+
+		err = __connman_provider_set_ipv6_for_connected(provider,
+									true);
+		if (err && err != -EALREADY)
+			DBG("cannot enable IPv6 on provider %p transport",
+								provider);
+
+		break;
+	}
 
 	__connman_service_ipconfig_indicate_state(provider->vpn_service, state,
 					CONNMAN_IPCONFIG_TYPE_IPV4);
