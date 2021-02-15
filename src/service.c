@@ -388,11 +388,17 @@ void __connman_service_split_routing_changed(struct connman_service *service)
 					service->identifier);
 }
 
+static bool is_connected(enum connman_service_state state);
+
 void __connman_service_set_split_routing(struct connman_service *service,
 								bool value)
 {
+	bool change;
+
 	if (service->type != CONNMAN_SERVICE_TYPE_VPN)
 		return;
+
+	change = service->do_split_routing != value;
 
 	service->do_split_routing = value;
 
@@ -400,6 +406,20 @@ void __connman_service_set_split_routing(struct connman_service *service,
 		service->order = 0;
 	else
 		service->order = 10;
+
+	/*
+	 * Change IPv6 on the VPN transport when split routing value changes
+	 * on a connected IPv4 VPN.
+	 */
+	if (connman_provider_get_family(service->provider) == AF_INET &&
+				change && is_connected(service->state)) {
+		if (__connman_provider_set_ipv6_for_connected(
+							service->provider,
+							value))
+			DBG("cannot %s IPv6 for VPN service %p provider %p",
+						value ? "enable" : "disable",
+						service, service->provider);
+	}
 
 	/*
 	 * In order to make sure the value is propagated also when loading the
