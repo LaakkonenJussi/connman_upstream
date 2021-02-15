@@ -697,6 +697,8 @@ int __connman_service_compare(const struct connman_service *a,
 
 struct connman_service *__connman_service_lookup_from_index(int index);
 struct connman_service *__connman_service_create_from_network(struct connman_network *network);
+void __connman_service_set_ipv6_for_connected(struct connman_service *vpn,
+				struct connman_service *transport, bool enable);
 struct connman_service *__connman_service_create_from_provider(struct connman_provider *provider);
 bool __connman_service_index_is_default(int index);
 void __connman_service_update_from_network(struct connman_network *network);

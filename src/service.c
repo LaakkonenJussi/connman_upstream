@@ -7233,6 +7233,123 @@ struct connman_service *__connman_service_lookup_from_index(int index)
 	return NULL;
 }
 
+struct set_ipv6_data {
+	struct connman_service *vpn;
+	struct connman_service *transport;
+	bool enable;
+};
+
+static void set_ipv6_for_service(gpointer value, gpointer user_data)
+{
+	struct connman_service *service = value;
+	struct connman_ipconfig *ipconfig;
+	struct connman_network *network;
+	struct set_ipv6_data *data = user_data;
+	int err;
+
+	/*
+	 * Ignore the vpn and not connected unless it is the transport. It is
+	 * imperative to set the IPv6 parameters on the transport even though
+	 * it is being disconnected. This ensures that the interface it is/was
+	 * using is set to the previous state.
+	 */
+	if ((!is_connected(service->state) || service == data->vpn) &&
+						service != data->transport)
+		return;
+
+	DBG("%s service %p/%s", data->enable ? "enable" : "disable", service,
+							service->identifier);
+
+	network = service->network;
+	if (!network)
+		return;
+
+	ipconfig = service->ipconfig_ipv6;
+	if (!ipconfig)
+		return;
+
+	if (data->enable == __connman_ipconfig_ipv6_is_enabled(ipconfig)) {
+		DBG("Ignore service, IPv6 already %s",
+					data->enable ? "enabled" : "disabled");
+		return;
+	}
+
+	if (data->enable) {
+		/*
+		 * Restore old method, force_disabled gets unset when enabling
+		 * as forced setting.
+		 */
+		__connman_ipconfig_ipv6_method_restore(ipconfig);
+
+		/* To allow enabling remove force disabled. */
+		__connman_ipconfig_set_force_disabled_ipv6(ipconfig, false);
+
+		/*
+		 * When changing to use another service the current service
+		 * used as transport is disconnected first and in that case
+		 * simply enable IPv6 via ipconfig instead of network to avoid
+		 * state changes.
+		 */
+		if (service == data->transport &&
+						!is_connected(service->state))
+			err = __connman_ipconfig_enable_ipv6(ipconfig);
+		else
+			err = __connman_network_enable_ipconfig(network,
+								ipconfig);
+
+		if (err)
+			connman_warn("cannot re-enable IPv6 on %s",
+						service->identifier);
+	} else {
+		/* Save the IPv6 method for enabling and clear network conf */
+		__connman_ipconfig_ipv6_method_save(ipconfig);
+		__connman_network_clear_ipconfig(network, ipconfig);
+		__connman_ipconfig_gateway_remove(ipconfig);
+
+		/* Disconnect and clear address */
+		__connman_service_ipconfig_indicate_state(service,
+					CONNMAN_SERVICE_STATE_DISCONNECT,
+					CONNMAN_IPCONFIG_TYPE_IPV6);
+		__connman_ipconfig_address_unset(ipconfig);
+
+		/*
+		 * Disables IPv6 on ipconfig and sets the force_disabled
+		 * as true.
+		 */
+		__connman_ipconfig_set_method(ipconfig,
+						CONNMAN_IPCONFIG_METHOD_OFF);
+		err = __connman_network_enable_ipconfig(network, ipconfig);
+		if (err)
+			connman_warn("cannot disable IPv6 on %s",
+							service->identifier);
+
+		/* Set force disabled on after disabling. */
+		__connman_ipconfig_set_force_disabled_ipv6(ipconfig, true);
+
+		__connman_service_ipconfig_indicate_state(service,
+						CONNMAN_SERVICE_STATE_IDLE,
+						CONNMAN_IPCONFIG_TYPE_IPV6);
+	}
+
+	ipv6_configuration_changed(service);
+	__connman_notifier_ipconfig_changed(service, ipconfig);
+}
+
+void __connman_service_set_ipv6_for_connected(struct connman_service *vpn,
+				struct connman_service *transport, bool enable)
+{
+	struct set_ipv6_data data = {
+		.vpn = vpn,
+		.transport = transport,
+		.enable = enable
+	};
+
+	DBG("%s vpn %p transport %p", enable ? "enable" : "disable", vpn,
+								transport);
+
+	g_list_foreach(service_list, set_ipv6_for_service, &data);
+}
+
 const char *connman_service_get_identifier(struct connman_service *service)
 {
 	return service ? service->identifier : NULL;
