@@ -49,12 +49,15 @@ struct connman_ipconfig {
 	void *ops_data;
 
 	enum connman_ipconfig_method method;
+	enum connman_ipconfig_method saved_method;
 	struct connman_ipaddress *address;
 	struct connman_ipaddress *system;
 
 	int ipv6_privacy_config;
 	char *last_dhcp_address;
 	char **last_dhcpv6_prefixes;
+
+	bool ipv6_force_disabled;
 };
 
 struct connman_ipdevice {
@@ -258,90 +261,121 @@ static const char *scope2str(unsigned char scope)
 	return "";
 }
 
-static bool get_ipv6_state(gchar *ifname)
+#define PROC_IPV4_CONF_PREFIX "/proc/sys/net/ipv4/conf"
+#define PROC_IPV6_CONF_PREFIX "/proc/sys/net/ipv6/conf"
+
+static int read_conf_value(const char *prefix, const char *ifname,
+					const char *suffix, int *value)
 {
-	int disabled;
 	gchar *path;
 	FILE *f;
-	bool enabled = false;
+	int err;
 
-	if (!ifname)
-		path = g_strdup("/proc/sys/net/ipv6/conf/all/disable_ipv6");
-	else
-		path = g_strdup_printf(
-			"/proc/sys/net/ipv6/conf/%s/disable_ipv6", ifname);
-
+	path = g_build_filename(prefix, ifname ? ifname : "all", suffix, NULL);
 	if (!path)
-		return enabled;
+		return -ENOMEM;
 
+	errno = 0;
 	f = fopen(path, "r");
+	if (!f) {
+		err = -errno;
+	} else {
+		errno = 0; /* Avoid stale errno values with fscanf */
+
+		err = fscanf(f, "%d", value);
+		if (err <= 0 && errno)
+			err = -errno;
+
+		fclose(f);
+	}
+
+	if (err <= 0)
+		connman_error("failed to read %s", path);
 
 	g_free(path);
 
-	if (f) {
-		if (fscanf(f, "%d", &disabled) > 0)
-			enabled = !disabled;
+	return err;
+}
+
+static int read_ipv4_conf_value(const char *ifname, const char *suffix,
+								int *value)
+{
+	return read_conf_value(PROC_IPV4_CONF_PREFIX, ifname, suffix, value);
+}
+
+static int read_ipv6_conf_value(const char *ifname, const char *suffix,
+								int *value)
+{
+	return read_conf_value(PROC_IPV6_CONF_PREFIX, ifname, suffix, value);
+}
+
+static int write_conf_value(const char *prefix, const char *ifname,
+					const char *suffix, int value) {
+	gchar *path;
+	FILE *f;
+	int rval;
+
+	path = g_build_filename(prefix, ifname ? ifname : "all", suffix, NULL);
+	if (!path)
+		return -ENOMEM;
+
+	f = fopen(path, "r+");
+	if (!f) {
+		rval = -errno;
+	} else {
+		rval = fprintf(f, "%d", value);
 		fclose(f);
 	}
+
+	if (rval <= 0)
+		connman_error("failed to set %s value %d", path, value);
+
+	g_free(path);
+
+	return rval;
+}
+
+static int write_ipv4_conf_value(const char *ifname, const char *suffix,
+								int value)
+{
+	return write_conf_value(PROC_IPV4_CONF_PREFIX, ifname, suffix, value);
+}
+
+static int write_ipv6_conf_value(const char *ifname, const char *suffix,
+								int value)
+{
+	return write_conf_value(PROC_IPV6_CONF_PREFIX, ifname, suffix, value);
+}
+
+static bool get_ipv6_state(gchar *ifname)
+{
+	int disabled;
+	bool enabled = false;
+
+	if (read_ipv6_conf_value(ifname, "disable_ipv6", &disabled) > 0)
+		enabled = !disabled;
 
 	return enabled;
 }
 
-static void set_ipv6_state(gchar *ifname, bool enable)
+static int set_ipv6_state(gchar *ifname, bool enable)
 {
-	gchar *path;
-	FILE *f;
+	int disabled = enable ? 0 : 1;
 
-	if (!ifname)
-		path = g_strdup("/proc/sys/net/ipv6/conf/all/disable_ipv6");
-	else
-		path = g_strdup_printf(
-			"/proc/sys/net/ipv6/conf/%s/disable_ipv6", ifname);
+	DBG("%s %d", ifname, disabled);
 
-	if (!path)
-		return;
-
-	f = fopen(path, "r+");
-
-	g_free(path);
-
-	if (!f)
-		return;
-
-	if (!enable)
-		fprintf(f, "1");
-	else
-		fprintf(f, "0");
-
-	fclose(f);
+	return write_ipv6_conf_value(ifname, "disable_ipv6", disabled);
 }
 
 static int get_ipv6_privacy(gchar *ifname)
 {
-	gchar *path;
-	FILE *f;
 	int value;
 
 	if (!ifname)
 		return 0;
 
-	path = g_strdup_printf("/proc/sys/net/ipv6/conf/%s/use_tempaddr",
-								ifname);
-
-	if (!path)
-		return 0;
-
-	f = fopen(path, "r");
-
-	g_free(path);
-
-	if (!f)
-		return 0;
-
-	if (fscanf(f, "%d", &value) <= 0)
+	if (read_ipv6_conf_value(ifname, "use_tempaddr", &value) < 0)
 		value = 0;
-
-	fclose(f);
 
 	return value;
 }
@@ -349,62 +383,52 @@ static int get_ipv6_privacy(gchar *ifname)
 /* Enable the IPv6 privacy extension for stateless address autoconfiguration.
  * The privacy extension is described in RFC 3041 and RFC 4941
  */
-static void set_ipv6_privacy(gchar *ifname, int value)
+static int set_ipv6_privacy(gchar *ifname, int value)
 {
-	gchar *path;
-	FILE *f;
-
 	if (!ifname)
-		return;
-
-	path = g_strdup_printf("/proc/sys/net/ipv6/conf/%s/use_tempaddr",
-								ifname);
-
-	if (!path)
-		return;
+		return -EINVAL;
 
 	if (value < 0)
 		value = 0;
 
-	f = fopen(path, "r+");
+	return write_ipv6_conf_value(ifname, "use_tempaddr", value);
+}
 
-	g_free(path);
+static int set_ipv6_autoconf(gchar *ifname, bool enable)
+{
+	int value = enable ? 1 : 0;
 
-	if (!f)
-		return;
+	DBG("%s %d", ifname, enable);
 
-	fprintf(f, "%d", value);
-	fclose(f);
+	return write_ipv6_conf_value(ifname, "autoconf", value);
 }
 
 static int get_rp_filter(void)
 {
-	FILE *f;
-	int value = -EINVAL, tmp;
+	int value;
 
-	f = fopen("/proc/sys/net/ipv4/conf/all/rp_filter", "r");
-
-	if (f) {
-		if (fscanf(f, "%d", &tmp) == 1)
-			value = tmp;
-		fclose(f);
-	}
+	if (read_ipv4_conf_value(NULL, "rp_filter", &value) < 0)
+		value = -EINVAL;
 
 	return value;
 }
 
-static void set_rp_filter(int value)
+static int set_rp_filter(int value)
 {
-	FILE *f;
+	/* 0 = no validation, 1 = strict mode, 2 = loose mode */
+	switch (value) {
+	case -1:
+		value = 0;
+		/* fall through */
+	case 0:
+	case 1:
+	case 2:
+		break;
+	default:
+		return -EINVAL;
+	}
 
-	f = fopen("/proc/sys/net/ipv4/conf/all/rp_filter", "r+");
-
-	if (!f)
-		return;
-
-	fprintf(f, "%d", value);
-
-	fclose(f);
+	return write_ipv4_conf_value(NULL, "rp_filter", value);
 }
 
 int __connman_ipconfig_set_rp_filter()
@@ -446,6 +470,13 @@ bool __connman_ipconfig_ipv6_is_enabled(struct connman_ipconfig *ipconfig)
 	bool ret;
 
 	if (!ipconfig)
+		return false;
+
+	/*
+	 * Return forced value since kernel can enable LL address for IPv6
+	 * for handling ICMPv6.
+	 */
+	if (ipconfig->ipv6_force_disabled)
 		return false;
 
 	ipdevice = g_hash_table_lookup(ipdevice_hash,
@@ -1236,6 +1267,8 @@ static struct connman_ipconfig *create_ipv6config(int index)
 	else
 		ipv6config->method = CONNMAN_IPCONFIG_METHOD_AUTO;
 
+	ipv6config->saved_method = CONNMAN_IPCONFIG_METHOD_UNKNOWN;
+
 	ipdevice = g_hash_table_lookup(ipdevice_hash, GINT_TO_POINTER(index));
 	if (ipdevice)
 		ipv6config->ipv6_privacy_config = ipdevice->ipv6_privacy;
@@ -1421,6 +1454,33 @@ enum connman_ipconfig_method __connman_ipconfig_get_method(
 	return ipconfig->method;
 }
 
+void __connman_ipconfig_ipv6_method_save(struct connman_ipconfig *ipconfig)
+{
+	if (!ipconfig || ipconfig->type != CONNMAN_IPCONFIG_TYPE_IPV6)
+		return;
+
+	DBG("%p method %d", ipconfig, ipconfig->method);
+
+	ipconfig->saved_method = ipconfig->method;
+}
+
+void __connman_ipconfig_ipv6_method_restore(struct connman_ipconfig *ipconfig)
+{
+	if (!ipconfig || ipconfig->type != CONNMAN_IPCONFIG_TYPE_IPV6)
+		return;
+
+	/* If not previously set, default to AUTO */
+	if (ipconfig->saved_method == CONNMAN_IPCONFIG_METHOD_UNKNOWN)
+		ipconfig->method = CONNMAN_IPCONFIG_METHOD_AUTO;
+	else
+		ipconfig->method = ipconfig->saved_method;
+
+	DBG("%p saved method %d set method %d", ipconfig,
+				ipconfig->saved_method, ipconfig->method);
+
+	ipconfig->saved_method = CONNMAN_IPCONFIG_METHOD_UNKNOWN;
+}
+
 int __connman_ipconfig_address_add(struct connman_ipconfig *ipconfig)
 {
 	switch (ipconfig->method) {
@@ -1567,7 +1627,7 @@ char **__connman_ipconfig_get_dhcpv6_prefixes(struct connman_ipconfig *ipconfig)
 	return ipconfig->last_dhcpv6_prefixes;
 }
 
-static void disable_ipv6(struct connman_ipconfig *ipconfig)
+static int disable_ipv6(struct connman_ipconfig *ipconfig)
 {
 	struct connman_ipdevice *ipdevice;
 	char *ifname;
@@ -1577,16 +1637,22 @@ static void disable_ipv6(struct connman_ipconfig *ipconfig)
 	ipdevice = g_hash_table_lookup(ipdevice_hash,
 					GINT_TO_POINTER(ipconfig->index));
 	if (!ipdevice)
-		return;
+		return -EINVAL;
+
+	DBG("%p force_disabled %s", ipconfig,
+				ipconfig->ipv6_force_disabled ? "yes" : "no");
 
 	ifname = connman_inet_ifname(ipconfig->index);
 
 	set_ipv6_state(ifname, false);
+	set_ipv6_autoconf(ifname, false);
 
 	g_free(ifname);
+
+	return 0;
 }
 
-static void enable_ipv6(struct connman_ipconfig *ipconfig)
+static int enable_ipv6(struct connman_ipconfig *ipconfig)
 {
 	struct connman_ipdevice *ipdevice;
 	char *ifname;
@@ -1596,7 +1662,14 @@ static void enable_ipv6(struct connman_ipconfig *ipconfig)
 	ipdevice = g_hash_table_lookup(ipdevice_hash,
 					GINT_TO_POINTER(ipconfig->index));
 	if (!ipdevice)
-		return;
+		return -EINVAL;
+
+	DBG("IPv6 %s %p force_disabled %s", is_ipv6_supported ? "on" : "off",
+				ipconfig,
+				ipconfig->ipv6_force_disabled ? "yes" : "no");
+
+	if (!is_ipv6_supported || ipconfig->ipv6_force_disabled)
+		return -EOPNOTSUPP;
 
 	ifname = connman_inet_ifname(ipconfig->index);
 
@@ -1604,16 +1677,19 @@ static void enable_ipv6(struct connman_ipconfig *ipconfig)
 		set_ipv6_privacy(ifname, ipconfig->ipv6_privacy_config);
 
 	set_ipv6_state(ifname, true);
+	set_ipv6_autoconf(ifname, true);
 
 	g_free(ifname);
+
+	return 0;
 }
 
-void __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig)
+int __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig)
 {
 	if (!ipconfig || ipconfig->type != CONNMAN_IPCONFIG_TYPE_IPV6)
-		return;
+		return -EINVAL;
 
-	enable_ipv6(ipconfig);
+	return enable_ipv6(ipconfig);
 }
 
 void __connman_ipconfig_disable_ipv6(struct connman_ipconfig *ipconfig)
@@ -1622,6 +1698,28 @@ void __connman_ipconfig_disable_ipv6(struct connman_ipconfig *ipconfig)
 		return;
 
 	disable_ipv6(ipconfig);
+}
+
+void __connman_ipconfig_set_force_disabled_ipv6(
+					struct connman_ipconfig *ipconfig,
+					bool force_disabled)
+{
+	if (!ipconfig || ipconfig->type != CONNMAN_IPCONFIG_TYPE_IPV6)
+		return;
+
+	ipconfig->ipv6_force_disabled = force_disabled;
+}
+
+int __connman_ipconfig_set_ipv6_support(bool enable)
+{
+	is_ipv6_supported = enable ? connman_inet_is_ipv6_supported() : false;
+
+	return 0;
+}
+
+bool __connman_ipconfig_get_ipv6_support()
+{
+	return is_ipv6_supported;
 }
 
 bool __connman_ipconfig_is_usable(struct connman_ipconfig *ipconfig)
@@ -1650,6 +1748,7 @@ int __connman_ipconfig_enable(struct connman_ipconfig *ipconfig)
 	bool lower_up = false, lower_down = false;
 	enum connman_ipconfig_type type;
 	char *ifname;
+	int err;
 
 	DBG("ipconfig %p", ipconfig);
 
@@ -1703,7 +1802,9 @@ int __connman_ipconfig_enable(struct connman_ipconfig *ipconfig)
 	else if (type == CONNMAN_IPCONFIG_TYPE_IPV6) {
 		ipdevice->config_ipv6 = __connman_ipconfig_ref(ipconfig);
 
-		enable_ipv6(ipdevice->config_ipv6);
+		err = enable_ipv6(ipdevice->config_ipv6);
+		if (err)
+			return err;
 	}
 	ipconfig_list = g_list_append(ipconfig_list, ipconfig);
 
@@ -1872,9 +1973,7 @@ int __connman_ipconfig_ipv6_set_privacy(struct connman_ipconfig *ipconfig,
 
 	ipconfig->ipv6_privacy_config = privacy;
 
-	enable_ipv6(ipconfig);
-
-	return 0;
+	return enable_ipv6(ipconfig);
 }
 
 void __connman_ipconfig_append_ipv4(struct connman_ipconfig *ipconfig,

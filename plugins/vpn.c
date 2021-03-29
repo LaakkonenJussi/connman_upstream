@@ -153,6 +153,8 @@ static const char *get_string(struct connman_provider *provider,
 			return data->host_ip[0];
 	} else if (g_str_equal(key, "VPN.Domain"))
 		return data->domain;
+	else if (g_str_equal(key, "Transport"))
+		return data->service_ident;
 
 	return g_hash_table_lookup(data->setting_strings, key);
 }

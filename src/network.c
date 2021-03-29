@@ -610,7 +610,9 @@ static int manual_ipv6_set(struct connman_network *network,
 	if (!__connman_ipconfig_get_local(ipconfig_ipv6))
 		__connman_service_read_ip6config(service);
 
-	__connman_ipconfig_enable_ipv6(ipconfig_ipv6);
+	err = __connman_ipconfig_enable_ipv6(ipconfig_ipv6);
+	if (err)
+		return err;
 
 	err = __connman_ipconfig_address_add(ipconfig_ipv6);
 	if (err < 0) {
@@ -898,7 +900,8 @@ static void autoconf_ipv6_set(struct connman_network *network)
 
 	__connman_ipconfig_enable(ipconfig);
 
-	__connman_ipconfig_enable_ipv6(ipconfig);
+	if (__connman_ipconfig_enable_ipv6(ipconfig))
+		return;
 
 	__connman_ipconfig_address_remove(ipconfig);
 
@@ -1037,6 +1040,10 @@ static void set_disconnected(struct connman_network *network)
 		 */
 		if (ipv6_method == CONNMAN_IPCONFIG_METHOD_AUTO) {
 			__connman_ipconfig_disable_ipv6(ipconfig_ipv6);
+
+			/* To allow enabling of IPv6 remove force disabled. */
+			__connman_ipconfig_set_force_disabled_ipv6(
+						ipconfig_ipv6, false);
 			__connman_ipconfig_enable_ipv6(ipconfig_ipv6);
 		}
 	}
@@ -1915,6 +1922,25 @@ int __connman_network_enable_ipconfig(struct connman_network *network,
 		return -ENOSYS;
 
 	case CONNMAN_IPCONFIG_TYPE_IPV6:
+		/*
+		 * If enabling IPv6 for new network while IPv6 support is
+		 * disabled enforce the ipconfig to be completely disabled to
+		 * disable autoconf and to avoid IPv6 address being set.
+		 */
+		if (!__connman_ipconfig_get_ipv6_support()) {
+			DBG("ipv6 not enabled, force disable %p", ipconfig);
+
+			__connman_ipconfig_ipv6_method_save(ipconfig);
+			__connman_ipconfig_set_method(ipconfig,
+						CONNMAN_IPCONFIG_METHOD_OFF);
+
+			__connman_ipconfig_disable_ipv6(ipconfig);
+			__connman_ipconfig_set_force_disabled_ipv6(ipconfig,
+									true);
+
+			return 0;
+		}
+
 		set_configuration(network, type);
 
 		method = __connman_ipconfig_get_method(ipconfig);

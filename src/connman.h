@@ -341,7 +341,12 @@ void __connman_ipconfig_set_ops(struct connman_ipconfig *ipconfig,
 int __connman_ipconfig_set_method(struct connman_ipconfig *ipconfig,
 					enum connman_ipconfig_method method);
 void __connman_ipconfig_disable_ipv6(struct connman_ipconfig *ipconfig);
-void __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig);
+int __connman_ipconfig_enable_ipv6(struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_set_force_disabled_ipv6(
+					struct connman_ipconfig *ipconfig,
+					bool force_disabled);
+int __connman_ipconfig_set_ipv6_support(bool enable);
+bool __connman_ipconfig_get_ipv6_support();
 
 int __connman_ipconfig_init(void);
 void __connman_ipconfig_cleanup(void);
@@ -406,6 +411,8 @@ void __connman_ipconfig_append_ethernet(struct connman_ipconfig *ipconfig,
 							DBusMessageIter *iter);
 enum connman_ipconfig_method __connman_ipconfig_get_method(
 				struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_ipv6_method_save(struct connman_ipconfig *ipconfig);
+void __connman_ipconfig_ipv6_method_restore(struct connman_ipconfig *ipconfig);
 
 int __connman_ipconfig_address_add(struct connman_ipconfig *ipconfig);
 int __connman_ipconfig_address_remove(struct connman_ipconfig *ipconfig);
@@ -663,6 +670,8 @@ void __connman_provider_list(DBusMessageIter *iter, void *user_data);
 bool __connman_provider_is_immutable(struct connman_provider *provider);
 int __connman_provider_create_and_connect(DBusMessage *msg);
 const char * __connman_provider_get_ident(struct connman_provider *provider);
+const char * __connman_provider_get_transport_ident(
+					struct connman_provider *provider);
 int __connman_provider_indicate_state(struct connman_provider *provider,
 					enum connman_provider_state state);
 int __connman_provider_indicate_error(struct connman_provider *provider,
@@ -670,6 +679,9 @@ int __connman_provider_indicate_error(struct connman_provider *provider,
 int __connman_provider_connect(struct connman_provider *provider,
 					const char *dbus_sender);
 int __connman_provider_remove_by_path(const char *path);
+int __connman_provider_set_ipv6_for_connected(
+					struct connman_provider *provider,
+					bool enable);
 void __connman_provider_cleanup(void);
 int __connman_provider_init(void);
 
@@ -688,6 +700,8 @@ int __connman_service_compare(const struct connman_service *a,
 
 struct connman_service *__connman_service_lookup_from_index(int index);
 struct connman_service *__connman_service_create_from_network(struct connman_network *network);
+void __connman_service_set_ipv6_for_connected(struct connman_service *vpn,
+				struct connman_service *transport, bool enable);
 struct connman_service *__connman_service_create_from_provider(struct connman_provider *provider);
 bool __connman_service_index_is_default(int index);
 void __connman_service_update_from_network(struct connman_network *network);
