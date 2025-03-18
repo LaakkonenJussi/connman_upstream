@@ -945,7 +945,7 @@ static int disconnect(struct vpn_provider *provider, int err)
 	data->provider = provider;
 	data->err = err ? err : exit_code;
 
-	info->dying_id = g_timeout_add(1, wg_died, data);
+	info->dying_id = g_timeout_add(50, wg_died, data);
 
 	return exit_code;
 }
