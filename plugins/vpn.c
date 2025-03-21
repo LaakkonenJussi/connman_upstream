@@ -156,6 +156,8 @@ static const char *get_string(struct connman_provider *provider,
 		return data->domain;
 	else if (g_str_equal(key, "Transport"))
 		return data->service_ident;
+	else if (g_str_equal(key, "State"))
+		return data->state;
 
 	return g_hash_table_lookup(data->setting_strings, key);
 }
@@ -268,6 +270,13 @@ static bool provider_is_connected(struct connection_data *data)
 			g_str_equal(data->state, "configuration"));
 }
 
+static bool provider_is_connected_or_connecting(struct connection_data *data)
+{
+	return data && (g_str_equal(data->state, "ready") ||
+			g_str_equal(data->state, "configuration") ||
+			g_str_equal(data->state, "association"));
+}
+
 static void set_provider_state(struct connection_data *data)
 {
 	enum connman_provider_state state = CONNMAN_PROVIDER_STATE_UNKNOWN;
@@ -276,13 +285,19 @@ static void set_provider_state(struct connection_data *data)
 
 	DBG("provider %p new state %s", data->provider, data->state);
 
-	connected = provider_is_connected(data);
+	/*
+	 * To avoid clearing transport ident when VPN is waiting for agent
+	 * take also connecting state into account.
+	 */
+	connected = provider_is_connected_or_connecting(data);
 
 	if (g_str_equal(data->state, "ready")) {
 		state = CONNMAN_PROVIDER_STATE_READY;
 		goto set;
 	} else if (g_str_equal(data->state, "configuration")) {
 		state = CONNMAN_PROVIDER_STATE_CONNECT;
+	} else if (g_str_equal(data->state, "association")) {
+		state = CONNMAN_PROVIDER_STATE_ASSOCIATION;
 	} else if (g_str_equal(data->state, "idle")) {
 		state = CONNMAN_PROVIDER_STATE_IDLE;
 	} else if (g_str_equal(data->state, "disconnect")) {
@@ -412,8 +427,8 @@ static int extract_ip(DBusMessageIter *array, int family,
 			dbus_message_iter_get_basic(&value, &netmask);
 			DBG("netmask %s", netmask);
 		} else if (g_str_equal(key, "PrefixLength")) {
-			dbus_message_iter_get_basic(&value, &netmask);
-			DBG("prefix length %s", netmask);
+			dbus_message_iter_get_basic(&value, &prefix_len);
+			DBG("prefix length %u", prefix_len);
 		} else if (g_str_equal(key, "Peer")) {
 			dbus_message_iter_get_basic(&value, &peer);
 			DBG("peer %s", peer);
@@ -436,7 +451,6 @@ static int extract_ip(DBusMessageIter *array, int family,
 								gateway);
 		break;
 	case AF_INET6:
-		prefix_len = atoi(netmask);
 		connman_ipaddress_set_ipv6(data->ip, address, prefix_len,
 								gateway);
 		break;
@@ -1072,7 +1086,7 @@ static int provider_disconnect(struct connman_provider *provider)
 	if (!data)
 		return -EINVAL;
 
-	if (provider_is_connected(data))
+	if (provider_is_connected_or_connecting(data))
 		err = disconnect_provider(data);
 
 	if (data->call) {
@@ -1540,55 +1554,92 @@ static void set_route(struct connection_data *data, struct vpn_route *route)
 static int save_route(GHashTable *routes, int family, const char *network,
 			const char *netmask, const char *gateway);
 
+
+static int set_network_route(struct connection_data *data, struct vpn_route *rt)
+{
+	int err;
+
+	if (!data || !rt)
+		return -EINVAL;
+
+	DBG("network %s gateway %s netmask %s for provider %p",
+					rt->network, rt->gateway, rt->netmask,
+					data->provider);
+
+	err = save_route(data->server_routes, rt->family, rt->network,
+						rt->netmask, rt->gateway);
+	if (err) {
+		connman_warn("failed to add network route for provider"
+					"%p", data->provider);
+		return err;
+	}
+
+	set_route(data, rt);
+
+	return 0;
+}
+
+static void free_network_route(struct vpn_route *rt)
+{
+	g_free(rt->network);
+	rt->network = NULL;
+
+	g_free(rt->netmask);
+	rt->network = NULL;
+
+	g_free(rt->gateway);
+	rt->network = NULL;
+}
+
 static int add_network_route(struct connection_data *data)
 {
 	struct vpn_route rt = { 0, };
-	int err;
+	int err = 0;
 
 	if (!data)
 		return -EINVAL;
 
-	rt.family = connman_provider_get_family(data->provider);
-	switch (rt.family) {
-	case PF_INET:
+	if (connman_provider_get_family(data->provider, AF_INET)) {
+		rt.family = AF_INET;
 		err = connman_inet_get_route_addresses(data->index,
-					&rt.network, &rt.netmask, &rt.gateway);
-		break;
-	case PF_INET6:
+					&rt.network, &rt.netmask,
+					&rt.gateway);
+		if (err) {
+			connman_error("cannot get IPv4 network/gateway/netmask "
+						"for %p/%s", data->provider,
+						data->ident);
+		} else {
+			err = set_network_route(data, &rt);
+			if (err)
+				connman_error("cannot set IPv4 network route "
+						"for %p/%s", data->provider,
+						data->ident);
+		}
+
+		free_network_route(&rt);
+	}
+
+	if (connman_provider_get_family(data->provider, AF_INET6)) {
+		rt.family = AF_INET6;
 		err = connman_inet_ipv6_get_route_addresses(data->index,
-					&rt.network, &rt.netmask, &rt.gateway);
-		break;
-	default:
-		connman_error("invalid protocol family %d", rt.family);
-		return -EINVAL;
+					&rt.network, &rt.netmask,
+					&rt.gateway);
+		if (err) {
+			connman_error("cannot get IPv6 network/gateway/netmask "
+						"for %p/%s", data->provider,
+						data->ident);
+		} else {
+			err = set_network_route(data, &rt);
+			if (err)
+				connman_error("cannot set IPv6 network route "
+						"for %p/%s", data->provider,
+						data->ident);
+		}
+
+		free_network_route(&rt);
 	}
 
-	DBG("network %s gateway %s netmask %s for provider %p",
-						rt.network, rt.gateway, rt.netmask,
-						data->provider);
-
-	if (err) {
-		connman_error("cannot get network/gateway/netmask for %p",
-							data->provider);
-		goto out;
-	}
-
-	err = save_route(data->server_routes, rt.family, rt.network, rt.netmask,
-				rt.gateway);
-	if (err) {
-		connman_warn("failed to add network route for provider"
-					"%p", data->provider);
-		goto out;
-	}
-
-	set_route(data, &rt);
-
-out:
-	g_free(rt.network);
-	g_free(rt.netmask);
-	g_free(rt.gateway);
-
-	return 0;
+	return err;
 }
 
 static bool is_valid_route_table(struct connman_provider *provider,
@@ -1653,6 +1704,14 @@ static bool check_routes(struct connman_provider *provider)
 	return false;
 }
 
+static void set_default_route(struct connection_data *data, int family,
+							char *ipaddr_any)
+{
+	struct vpn_route def_route = {family, ipaddr_any, ipaddr_any, NULL};
+
+	set_route(data, &def_route);
+}
+
 static int set_routes(struct connman_provider *provider,
 				enum connman_provider_route_type type)
 {
@@ -1685,13 +1744,10 @@ static int set_routes(struct connman_provider *provider,
 	/* If non-split routed VPN does not have a default route, add it */
 	if (!connman_provider_is_split_routing(provider) &&
 						!data->default_route_set) {
-		int family = connman_provider_get_family(provider);
-		const char *ipaddr_any = family == AF_INET6 ?
-							"::" : "0.0.0.0";
-		struct vpn_route def_route = {family, (char*) ipaddr_any,
-						(char*) ipaddr_any, NULL};
-
-		set_route(data, &def_route);
+		if (connman_provider_get_family(provider, AF_INET))
+			set_default_route(data, AF_INET, "0.0.0.0");
+		if (connman_provider_get_family(provider, AF_INET6))
+			set_default_route(data, AF_INET6, "::");
 	}
 
 	/* Split routed VPN must have at least one route to the network */
@@ -1726,7 +1782,7 @@ static void destroy_provider(struct connection_data *data)
 {
 	DBG("data %p", data);
 
-	if (provider_is_connected(data))
+	if (provider_is_connected_or_connecting(data))
 		connman_provider_disconnect(data->provider);
 
 	connman_provider_set_data(data->provider, NULL);
@@ -2179,7 +2235,7 @@ static bool vpn_is_valid_transport(struct connman_service *transport)
 
 static void vpn_disconnect_check_provider(struct connection_data *data)
 {
-	if (provider_is_connected(data)) {
+	if (provider_is_connected_or_connecting(data)) {
 		/* With NULL service ident NULL is returned immediately */
 		struct connman_service *service =
 			connman_service_lookup_from_identifier

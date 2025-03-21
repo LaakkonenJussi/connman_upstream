@@ -466,6 +466,11 @@ done:
 	return ret;
 }
 
+bool connman_inet_is_any_addr(const char *address, int family)
+{
+	return __connman_inet_is_any_addr(address, family);
+}
+
 struct in6_ifreq {
 	struct in6_addr ifr6_addr;
 	__u32 ifr6_prefixlen;

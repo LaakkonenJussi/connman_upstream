@@ -4906,6 +4906,30 @@ static void dns_configuration_changed(struct connman_service *service)
 	dns_changed(service);
 }
 
+static void vpn_transport_dns_changed(struct connman_service *service)
+{
+	struct connman_service *transport;
+	const char *ident;
+
+	if (!service || service->type != CONNMAN_SERVICE_TYPE_VPN)
+		return;
+
+	ident = connman_provider_get_string(service->provider, "Transport");
+	if (!ident)
+		return;
+
+	transport = connman_service_lookup_from_identifier(ident);
+	if (!transport)
+		return;
+
+	DBG("transport %p/%s", transport, ident);
+
+	connman_dbus_property_changed_array(service->path,
+				CONNMAN_SERVICE_INTERFACE,
+				"TransportNameservers",
+				DBUS_TYPE_STRING, append_dns, transport);
+}
+
 static void domain_changed(struct connman_service *service)
 {
 	if (!allow_property_changed(service))
@@ -7299,8 +7323,27 @@ static gboolean connect_timeout(gpointer user_data)
 
 	if (service->network)
 		__connman_network_disconnect(service->network);
-	else if (service->provider)
+	else if (service->provider) {
+		/*
+		 * Remove timeout when the VPN is waiting for user input in
+		 * association state. By default the VPN agent timeout is
+		 * 300s whereas default connection timeout is 120s. Provider
+		 * will start connect timeout for the service when it enters
+		 * configuration state.
+		 */
+		const char *statestr = connman_provider_get_string(
+					service->provider, "State");
+		if (!g_strcmp0(statestr, "association")) {
+			DBG("VPN provider %p is waiting for VPN agent, "
+						"stop connect timeout",
+						service->provider);
+			return G_SOURCE_REMOVE;
+		}
+
 		connman_provider_disconnect(service->provider);
+	}
+
+
 
 	__connman_stats_service_unregister(service);
 
@@ -7328,7 +7371,27 @@ static gboolean connect_timeout(gpointer user_data)
 				CONNMAN_SERVICE_CONNECT_REASON_USER)
 		do_auto_connect(service, CONNMAN_SERVICE_CONNECT_REASON_AUTO);
 
-	return FALSE;
+	return G_SOURCE_REMOVE;
+}
+
+void __connman_service_start_connect_timeout(struct connman_service *service,
+								bool restart)
+{
+	DBG("");
+
+	if (!service)
+		return;
+
+	if (!restart && service->timeout)
+		return;
+
+	if (restart && service->timeout) {
+		DBG("cancel running connect timeout");
+		g_source_remove(service->timeout);
+	}
+
+	service->timeout = g_timeout_add_seconds(CONNECT_TIMEOUT,
+				connect_timeout, service);
 }
 
 static DBusMessage *connect_service(DBusConnection *conn,
@@ -9334,6 +9397,9 @@ static int service_indicate_state(struct connman_service *service)
 							"WiFi.UseWPS", false);
 		}
 
+		if (service->type == CONNMAN_SERVICE_TYPE_VPN)
+			vpn_transport_dns_changed(service);
+
 		gettimeofday(&service->modified, NULL);
 		service_save(service);
 
@@ -9883,16 +9949,19 @@ static int service_connect(struct connman_service *service)
 	else
 		return -EOPNOTSUPP;
 
-	if (err < 0) {
-		if (err != -EINPROGRESS) {
-			__connman_service_ipconfig_indicate_state(service,
+	switch (err) {
+	case 0:
+	case -EALREADY:
+	case -EINPROGRESS:
+		break;
+	default:
+		__connman_service_ipconfig_indicate_state(service,
 						CONNMAN_SERVICE_STATE_FAILURE,
 						CONNMAN_IPCONFIG_TYPE_IPV4);
-			__connman_service_ipconfig_indicate_state(service,
+		__connman_service_ipconfig_indicate_state(service,
 						CONNMAN_SERVICE_STATE_FAILURE,
 						CONNMAN_IPCONFIG_TYPE_IPV6);
-			__connman_stats_service_unregister(service);
-		}
+		__connman_stats_service_unregister(service);
 	}
 
 	return err;
@@ -9952,9 +10021,12 @@ int __connman_service_connect(struct connman_service *service,
 		return 0;
 
 	if (err == -EINPROGRESS) {
-		if (service->timeout == 0)
-			service->timeout = g_timeout_add_seconds(
-				CONNECT_TIMEOUT, connect_timeout, service);
+		/*
+		 * VPN will start connect timeout when it enters CONFIGURATION
+		 * state.
+		 */
+		if (service->type != CONNMAN_SERVICE_TYPE_VPN)
+			__connman_service_start_connect_timeout(service, false);
 
 		return -EINPROGRESS;
 	}
