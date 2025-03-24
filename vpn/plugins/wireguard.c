@@ -249,9 +249,12 @@ static int get_endpoint_addr(const char *host, const char *port, int flags,
 }
 
 static int parse_endpoint_hostname(const char *host, const char *port,
-							struct sockaddr_u *addr)
+							struct sockaddr_u *addr,
+							char **gateway_resolved)
 {
 	char **tokens;
+	const char *gw = NULL;
+	char buf[INET6_ADDRSTRLEN] = { 0 };
 	unsigned int len;
 	int err;
 
@@ -271,8 +274,32 @@ static int parse_endpoint_hostname(const char *host, const char *port,
 	DBG("using host %s", tokens[0]);
 
 	err = get_endpoint_addr(tokens[0], port, 0, addr);
-	if (!err)
+	if (!err) {
+		/* In case the endpoint is an host address use the resolved
+		 * IP address as gateway for DNS over WireGuard to work.
+		 */
+		if (connman_inet_check_ipaddress(tokens[0]) <= 0) {
+			switch (addr->sa.sa_family) {
+			case AF_INET:
+				gw = inet_ntop(AF_INET, &addr->sin.sin_addr,
+						buf,
+						sizeof(struct sockaddr_in));
+				break;
+			case AF_INET6:
+				gw = inet_ntop(AF_INET6,
+						&addr->sin6.sin6_addr,
+						buf,
+						sizeof(struct sockaddr_in6));
+				break;
+			default:
+				break;
+			}
+		}
+
 		DBG("success");
+	}
+
+	*gateway_resolved = gw ? g_strdup(gw) : g_strdup(tokens[0]);
 
 	g_strfreev(tokens);
 
@@ -758,7 +785,9 @@ static int wg_connect(struct vpn_provider *provider,
 {
 	struct wg_ipaddresses ipaddresses = { 0 };
 	struct wireguard_info *info;
-	const char *option, *gateway;
+	const char *option;
+	const char *gateway;
+	char *gateway_resolved = NULL;
 	char *ifname;
 	bool do_split_routing = true;
 	int err = -EINVAL;
@@ -855,7 +884,8 @@ static int wg_connect(struct vpn_provider *provider,
 	 * connection that may end up blocking vpnd with getaddrinfo().
 	 */
 	err = parse_endpoint_hostname(gateway, option,
-			(struct sockaddr_u *)&info->peer.endpoint.addr);
+			(struct sockaddr_u *)&info->peer.endpoint.addr,
+			&gateway_resolved);
 	if (err) {
 		DBG("Failed to parse endpoint %s:%s", gateway, option);
 		goto error;
@@ -869,11 +899,13 @@ static int wg_connect(struct vpn_provider *provider,
 		DBG("Missing WireGuard.Address configuration");
 		goto error;
 	}
-	err = parse_addresses(option, gateway, &ipaddresses);
+	err = parse_addresses(option, gateway_resolved, &ipaddresses);
 	if (err) {
 		DBG("Failed to parse addresses %s gateway %s", option, gateway);
 		goto error;
 	}
+
+	g_free(gateway_resolved);
 
 	ifname = get_ifname();
 	if (!ifname) {
