@@ -53,7 +53,6 @@
 
 #define DNS_RERESOLVE_TIMEOUT 20
 #define DNS_RERESOLVE_ERROR_LIMIT 5
-#define DNS_DEFAULT_PORT 53
 #define ROUTE_SETUP_TIMEOUT 200 // ms
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
 
@@ -569,7 +568,7 @@ static void resolve_endpoint_cb(GResolvResultStatus status,
 	case G_RESOLV_RESULT_STATUS_NO_ANSWER:
 	case G_RESOLV_RESULT_STATUS_NO_RESPONSE:
 	case G_RESOLV_RESULT_STATUS_SERVER_FAILURE:
-		DBG("retry DNS reresolve, status %d", status);
+		DBG("retry DNS reresolve");
 		if (info->provider)
 			vpn_provider_add_error(info->provider,
 					VPN_PROVIDER_ERROR_CONNECT_FAILED);
@@ -581,7 +580,7 @@ static void resolve_endpoint_cb(GResolvResultStatus status,
 	case G_RESOLV_RESULT_STATUS_FORMAT_ERROR:
 	case G_RESOLV_RESULT_STATUS_NOT_IMPLEMENTED:
 	case G_RESOLV_RESULT_STATUS_REFUSED:
-		DBG("stop DNS reresolve, status %d", status);
+		DBG("stop DNS reresolve, error %d", status);
 		if (err && info->provider)
 			vpn_provider_add_error(info->provider,
 					VPN_PROVIDER_ERROR_CONNECT_FAILED);
@@ -635,9 +634,7 @@ static int disconnect(struct vpn_provider *provider, int error);
 static gboolean wg_dns_reresolve_cb(gpointer user_data)
 {
 	struct wireguard_info *info = user_data;
-	char **nameservers;
 	int err;
-	int i;
 
 	DBG("");
 
@@ -656,11 +653,8 @@ static gboolean wg_dns_reresolve_cb(gpointer user_data)
 
 	DBG("endpoint_fqdn %s", info->endpoint_fqdn);
 
-	nameservers = vpn_provider_get_string_list(info->provider,
-							"TransportNameservers");
-	for (i = 0; nameservers && nameservers[i]; i++)
-		vpn_util_resolv_add_nameserver(info->resolv, nameservers[i],
-							DNS_DEFAULT_PORT, 0);
+	vpn_util_resolv_add_nameserver(info->resolv, "::1", 53, 0);
+	vpn_util_resolv_add_nameserver(info->resolv, "127.0.0.1", 53, 0);
 
 	info->resolv_id = vpn_util_resolve_hostname(info->resolv,
 						info->endpoint_fqdn,
