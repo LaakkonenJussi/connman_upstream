@@ -653,9 +653,6 @@ static gboolean wg_dns_reresolve_cb(gpointer user_data)
 
 	DBG("endpoint_fqdn %s", info->endpoint_fqdn);
 
-	vpn_util_resolv_add_nameserver(info->resolv, "::1", 53, 0);
-	vpn_util_resolv_add_nameserver(info->resolv, "127.0.0.1", 53, 0);
-
 	info->resolv_id = vpn_util_resolve_hostname(info->resolv,
 						info->endpoint_fqdn,
 						resolve_endpoint_cb, info);
