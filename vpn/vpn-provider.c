@@ -55,6 +55,7 @@
 #include "vpn-provider.h"
 #include "vpn.h"
 #include "plugins/vpn.h"
+#include "../src/shared/util.h"
 
 static DBusConnection *connection;
 static GHashTable *provider_hash;
@@ -85,7 +86,7 @@ struct vpn_provider {
 	char *type;
 	char *host;
 	char *domain;
-	int family;
+	bool family[AF_ARRAY_LENGTH];
 	bool do_split_routing;
 	GHashTable *routes;
 	struct vpn_provider_driver *driver;
@@ -124,8 +125,40 @@ static unsigned int get_connman_state_timeout;
 static guint connman_signal_watch;
 static guint connman_service_watch;
 
-static bool connman_online;
+enum connman_state {
+	CONNMAN_IDLE = 0,
+	CONNMAN_OFFLINE,
+	CONNMAN_READY,
+	CONNMAN_ONLINE
+};
+
+static enum connman_state connman_online_state = CONNMAN_IDLE;
 static bool state_query_completed;
+
+
+static bool provider_get_family(struct vpn_provider *provider, int family)
+{
+	if (!provider)
+		return false;
+
+	return util_get_afs(provider->family, family);
+}
+
+static void provider_set_family(struct vpn_provider *provider, int family)
+{
+	if (!provider)
+		return;
+
+	util_set_afs(provider->family, family);
+}
+
+static void provider_reset_family(struct vpn_provider *provider)
+{
+	if (!provider)
+		return;
+
+	util_reset_afs(provider->family);
+}
 
 static void append_properties(DBusMessageIter *iter,
 				struct vpn_provider *provider);
@@ -138,22 +171,46 @@ static void set_state(const char *new_state)
 	if (!new_state || !*new_state)
 		return;
 
-	DBG("old state %s new state %s",
-				connman_online ?
-				CONNMAN_STATE_ONLINE "/" CONNMAN_STATE_READY :
-				CONNMAN_STATE_OFFLINE "/" CONNMAN_STATE_IDLE,
-				new_state);
+	DBG("received %s, old state %d", new_state, connman_online_state);
 
-	/* States "online" and "ready" mean connman is online */
-	if (!g_ascii_strcasecmp(new_state, CONNMAN_STATE_ONLINE) ||
-			!g_ascii_strcasecmp(new_state, CONNMAN_STATE_READY))
-		connman_online = true;
-	/* Everything else means connman is offline */
+	if (!g_ascii_strcasecmp(new_state, CONNMAN_STATE_ONLINE))
+		connman_online_state = CONNMAN_ONLINE;
+	else if (!g_ascii_strcasecmp(new_state, CONNMAN_STATE_READY))
+		connman_online_state = CONNMAN_READY;
+	else if (!g_ascii_strcasecmp(new_state, CONNMAN_STATE_OFFLINE))
+		connman_online_state = CONNMAN_OFFLINE;
 	else
-		connman_online = false;
+		connman_online_state = CONNMAN_IDLE;
 
-	DBG("set state %s connman_online=%s ", new_state,
-				connman_online ? "true" : "false");
+	DBG("new state %d ", connman_online_state);
+}
+
+static bool is_connman_connected(struct vpn_provider *provider)
+{
+	int flags = 0;
+
+	DBG("provider %p connmand state %d", provider, connman_online_state);
+
+	if (provider && provider->driver && provider->driver->get_flags)
+		flags = provider->driver->get_flags(provider);
+
+	switch (connman_online_state) {
+	case CONNMAN_IDLE:
+	case CONNMAN_OFFLINE:
+		return false;
+	case CONNMAN_READY:
+		/* VPNs without daemon may require that network is setup. */
+		if (flags & VPN_FLAG_NO_DAEMON) {
+			DBG("daemonless provider, return false in ready");
+			return false;
+		}
+
+		/* fall-through */
+	case CONNMAN_ONLINE:
+		break;
+	}
+
+	return true;
 }
 
 static void free_route(gpointer data)
@@ -806,8 +863,8 @@ static gboolean do_connect_timeout_function(gpointer data)
 
 	DBG("");
 
-	/* Keep in main loop if connman is not online. */
-	if (!connman_online)
+	/* Keep in main loop if connman is not ready for this VPN. */
+	if (!is_connman_connected(provider))
 		return G_SOURCE_CONTINUE;
 
 	provider->do_connect_timeout = 0;
@@ -861,8 +918,17 @@ static DBusMessage *do_connect(DBusConnection *conn, DBusMessage *msg,
 
 	DBG("conn %p provider %p", conn, provider);
 
-	if (!connman_online) {
+	if (!is_connman_connected(provider)) {
 		if (state_query_completed) {
+			/* Query done but connmand not online for daemonless */
+			if (connman_online_state >= CONNMAN_READY) {
+				DBG("Provider %s start delayed, wait for "
+						"connman online state",
+						provider->identifier);
+				do_connect_later(provider, conn, msg);
+				return NULL;
+			}
+
 			DBG("%s not started - ConnMan not online/ready",
 				provider->identifier);
 			return __connman_error_failed(msg, ENOLINK);
@@ -1487,6 +1553,23 @@ int __vpn_provider_disconnect(struct vpn_provider *provider)
 	return err;
 }
 
+static bool is_connected_state(enum vpn_provider_state state)
+{
+	switch (state) {
+	case VPN_PROVIDER_STATE_UNKNOWN:
+	case VPN_PROVIDER_STATE_IDLE:
+	case VPN_PROVIDER_STATE_DISCONNECT:
+	case VPN_PROVIDER_STATE_FAILURE:
+		break;
+	case VPN_PROVIDER_STATE_CONNECT:
+	case VPN_PROVIDER_STATE_READY:
+	case VPN_PROVIDER_STATE_ASSOCIATION:
+		return true;
+	}
+
+	return false;
+}
+
 static void connect_cb(struct vpn_provider *provider, void *user_data,
 								int error)
 {
@@ -1509,6 +1592,8 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 			 * No reply, disconnect called by connmand because of
 			 * connection timeout.
 			 */
+			vpn_provider_indicate_error(provider,
+					VPN_PROVIDER_ERROR_CONNECT_FAILED);
 			break;
 		case ENOMSG:
 			/* fall through */
@@ -1533,9 +1618,7 @@ static void connect_cb(struct vpn_provider *provider, void *user_data,
 			 * process gets killed and vpn_died() is called to make
 			 * the provider back to idle state.
 			 */
-			if (provider->state == VPN_PROVIDER_STATE_CONNECT ||
-						provider->state ==
-						VPN_PROVIDER_STATE_READY) {
+			if (is_connected_state(provider->state)) {
 				if (provider->driver->set_state)
 					provider->driver->set_state(provider,
 						VPN_PROVIDER_STATE_DISCONNECT);
@@ -1598,6 +1681,17 @@ int __vpn_provider_connect(struct vpn_provider *provider, DBusMessage *msg)
 			g_dbus_send_message(connection, reply);
 
 		return -EINPROGRESS;
+	case VPN_PROVIDER_STATE_ASSOCIATION:
+		/*
+		 * Do not interrupt user when inputting credentials via agent.
+		 * The driver is in CONNECT state that would return EINPROGRESS
+		 * and change provider state to CONNECT.
+		 */
+		reply = __connman_error_in_progress(msg);
+		if (reply)
+			g_dbus_send_message(connection, reply);
+
+		return -EINPROGRESS;
 	case VPN_PROVIDER_STATE_UNKNOWN:
 	case VPN_PROVIDER_STATE_IDLE:
 	case VPN_PROVIDER_STATE_CONNECT:
@@ -1625,8 +1719,19 @@ int __vpn_provider_connect(struct vpn_provider *provider, DBusMessage *msg)
 	} else
 		return -EOPNOTSUPP;
 
-	if (err == -EINPROGRESS)
-		vpn_provider_set_state(provider, VPN_PROVIDER_STATE_CONNECT);
+	if (err == -EINPROGRESS) {
+		vpn_provider_set_state(provider,
+					VPN_PROVIDER_STATE_ASSOCIATION);
+
+		/*
+		 * If the VPN does not use VPN agent do direct transition to
+		 * connect in order to support the complete state machine.
+		 */
+		if (provider->driver && provider->driver->uses_vpn_agent &&
+				!provider->driver->uses_vpn_agent(provider))
+			vpn_provider_set_state(provider,
+						VPN_PROVIDER_STATE_CONNECT);
+	}
 
 	return err;
 }
@@ -1767,6 +1872,8 @@ static const char *state2string(enum vpn_provider_state state)
 		break;
 	case VPN_PROVIDER_STATE_IDLE:
 		return "idle";
+	case VPN_PROVIDER_STATE_ASSOCIATION:
+		return "association";
 	case VPN_PROVIDER_STATE_CONNECT:
 		return "configuration";
 	case VPN_PROVIDER_STATE_READY:
@@ -1834,11 +1941,11 @@ static int provider_indicate_state(struct vpn_provider *provider,
 					VPN_CONNECTION_INTERFACE, "Index",
 					DBUS_TYPE_INT32, &provider->index);
 
-		if (provider->family == AF_INET)
+		if (provider_get_family(provider, AF_INET))
 			connman_dbus_property_changed_dict(provider->path,
 					VPN_CONNECTION_INTERFACE, "IPv4",
 					append_ipv4, provider);
-		else if (provider->family == AF_INET6)
+		if (provider_get_family(provider, AF_INET6))
 			connman_dbus_property_changed_dict(provider->path,
 					VPN_CONNECTION_INTERFACE, "IPv6",
 					append_ipv6, provider);
@@ -1874,6 +1981,9 @@ static void append_state(DBusMessageIter *iter,
 	case VPN_PROVIDER_STATE_UNKNOWN:
 	case VPN_PROVIDER_STATE_IDLE:
 		str = "idle";
+		break;
+	case VPN_PROVIDER_STATE_ASSOCIATION:
+		str = "association";
 		break;
 	case VPN_PROVIDER_STATE_CONNECT:
 		str = "configuration";
@@ -1932,10 +2042,10 @@ static void append_properties(DBusMessageIter *iter,
 	connman_dbus_dict_append_basic(&dict, "SplitRouting",
 					DBUS_TYPE_BOOLEAN, &split_routing);
 
-	if (provider->family == AF_INET)
+	if (provider_get_family(provider, AF_INET))
 		connman_dbus_dict_append_dict(&dict, "IPv4", append_ipv4,
 						provider);
-	else if (provider->family == AF_INET6)
+	if (provider_get_family(provider, AF_INET6))
 		connman_dbus_dict_append_dict(&dict, "IPv6", append_ipv6,
 						provider);
 
@@ -1988,18 +2098,16 @@ static void connection_added_signal(struct vpn_provider *provider)
 static int set_connected(struct vpn_provider *provider,
 					bool connected)
 {
-	struct vpn_ipconfig *ipconfig;
-
 	DBG("provider %p id %s connected %d", provider,
 					provider->identifier, connected);
 
 	if (connected) {
-		if (provider->family == AF_INET6)
-			ipconfig = provider->ipconfig_ipv6;
-		else
-			ipconfig = provider->ipconfig_ipv4;
-
-		__vpn_ipconfig_address_add(ipconfig, provider->family);
+		if (provider_get_family(provider, AF_INET))
+			__vpn_ipconfig_address_add(provider->ipconfig_ipv4,
+								AF_INET);
+		if (provider_get_family(provider, AF_INET6))
+			__vpn_ipconfig_address_add(provider->ipconfig_ipv6,
+								AF_INET6);
 
 		provider_indicate_state(provider,
 					VPN_PROVIDER_STATE_READY);
@@ -2009,6 +2117,7 @@ static int set_connected(struct vpn_provider *provider,
 
 		provider_indicate_state(provider,
 					VPN_PROVIDER_STATE_IDLE);
+		provider_reset_family(provider);
 	}
 
 	return 0;
@@ -2026,6 +2135,10 @@ int vpn_provider_set_state(struct vpn_provider *provider,
 	case VPN_PROVIDER_STATE_IDLE:
 		return set_connected(provider, false);
 	case VPN_PROVIDER_STATE_CONNECT:
+		if (provider->driver && provider->driver->set_state)
+			provider->driver->set_state(provider, state);
+		return provider_indicate_state(provider, state);
+	case VPN_PROVIDER_STATE_ASSOCIATION:
 		return provider_indicate_state(provider, state);
 	case VPN_PROVIDER_STATE_READY:
 		return set_connected(provider, true);
@@ -2952,6 +3065,22 @@ void vpn_provider_set_auth_error_limit(struct vpn_provider *provider,
 	provider->auth_error_limit = limit;
 }
 
+bool __vpn_provider_check_routes(struct vpn_provider *provider)
+{
+	if (!provider)
+		return false;
+
+	if (provider->user_routes &&
+			g_hash_table_size(provider->user_routes) > 0)
+		return true;
+
+	if (provider->routes &&
+			g_hash_table_size(provider->routes) > 0)
+		return true;
+
+	return false;
+}
+
 void *vpn_provider_get_data(struct vpn_provider *provider)
 {
 	return provider->driver_data;
@@ -3029,7 +3158,7 @@ int vpn_provider_set_ipaddress(struct vpn_provider *provider,
 	if (!ipconfig)
 		return -EINVAL;
 
-	provider->family = ipaddress->family;
+	provider_set_family(provider, ipaddress->family);
 
 	if (provider->state == VPN_PROVIDER_STATE_CONNECT ||
 			provider->state == VPN_PROVIDER_STATE_READY) {
@@ -3160,6 +3289,60 @@ int vpn_provider_append_route(struct vpn_provider *provider,
 
 	if (route->netmask && route->gateway && route->network)
 		provider_schedule_changed(provider);
+
+	return 0;
+}
+
+int vpn_provider_append_route_complete(struct vpn_provider *provider,
+				unsigned long idx, int family,
+				const char *network, const char *netmask,
+				const char *gateway)
+{
+	struct vpn_route *route;
+
+	DBG("provider %p idx %lu family %d network %s netmask %s gateway %s",
+						provider, idx, family, network,
+						netmask, gateway);
+
+	if (!netmask || !gateway || !network)
+		return -EINVAL;
+
+	if (g_hash_table_lookup(provider->routes, GINT_TO_POINTER(idx)))
+		return -EALREADY;
+
+	route = g_new0(struct vpn_route, 1);
+	route->family = family;
+	route->network = g_strdup(network);
+	route->netmask = g_strdup(netmask);
+	route->gateway = g_strdup(gateway);
+
+	g_hash_table_replace(provider->routes, GINT_TO_POINTER(idx), route);
+	provider_schedule_changed(provider);
+
+	return 0;
+}
+
+void vpn_provider_delete_all_routes(struct vpn_provider *provider)
+{
+	DBG("provider %p", provider);
+;
+	if (!__vpn_provider_check_routes(provider))
+		return;
+
+	g_hash_table_remove_all(provider->routes);
+	provider_schedule_changed(provider);
+}
+
+int vpn_provider_delete_route(struct vpn_provider *provider,
+							unsigned long idx)
+{
+	if (!__vpn_provider_check_routes(provider))
+		return -ENOENT;
+
+	if (!g_hash_table_remove(provider->routes, GINT_TO_POINTER(idx)))
+		return -EINVAL;
+
+	provider_schedule_changed(provider);
 
 	return 0;
 }
@@ -3319,18 +3502,13 @@ unsigned int vpn_provider_get_connection_errors(
 
 void vpn_provider_change_address(struct vpn_provider *provider)
 {
-	switch (provider->family) {
-	case AF_INET:
+	if (provider_get_family(provider, AF_INET))
 		connman_inet_set_address(provider->index,
 			__vpn_ipconfig_get_address(provider->ipconfig_ipv4));
-		break;
-	case AF_INET6:
+
+	if (provider_get_family(provider, AF_INET6))
 		connman_inet_set_ipv6_address(provider->index,
 			__vpn_ipconfig_get_address(provider->ipconfig_ipv6));
-		break;
-	default:
-		break;
-	}
 }
 
 void vpn_provider_clear_address(struct vpn_provider *provider, int family)

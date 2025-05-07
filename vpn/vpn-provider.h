@@ -44,6 +44,12 @@ enum vpn_provider_state {
 	VPN_PROVIDER_STATE_READY         = 3,
 	VPN_PROVIDER_STATE_DISCONNECT    = 4,
 	VPN_PROVIDER_STATE_FAILURE       = 5,
+	/*
+	 * Special state to indicate that user interaction is being waited for
+	 * and disconnect timeout in connmand should not terminate this VPN but
+	 * to let the agent timeout handle the case.
+	 */
+	VPN_PROVIDER_STATE_ASSOCIATION   = 6,
 };
 
 enum vpn_provider_error {
@@ -118,6 +124,13 @@ int vpn_provider_set_nameservers(struct vpn_provider *provider,
 					const char *nameservers);
 int vpn_provider_append_route(struct vpn_provider *provider,
 					const char *key, const char *value);
+int vpn_provider_append_route_complete(struct vpn_provider *provider,
+				unsigned long idx, int family,
+				const char *address, const char *netmask,
+				const char *gateway);
+void vpn_provider_delete_all_routes(struct vpn_provider *provider);
+int vpn_provider_delete_route(struct vpn_provider *provider,
+							unsigned long index);
 
 const char *vpn_provider_get_driver_name(struct vpn_provider *provider);
 const char *vpn_provider_get_save_group(struct vpn_provider *provider);
@@ -161,6 +174,8 @@ struct vpn_provider_driver {
 	int (*route_env_parse) (struct vpn_provider *provider, const char *key,
 			int *family, unsigned long *idx,
 			enum vpn_provider_route_type *type);
+	bool (*uses_vpn_agent) (struct vpn_provider *provider);
+	int (*get_flags)(struct vpn_provider *provider);
 };
 
 int vpn_provider_driver_register(struct vpn_provider_driver *driver);

@@ -44,10 +44,11 @@ enum connman_provider_type {
 enum connman_provider_state {
 	CONNMAN_PROVIDER_STATE_UNKNOWN       = 0,
 	CONNMAN_PROVIDER_STATE_IDLE          = 1,
-	CONNMAN_PROVIDER_STATE_CONNECT       = 2,
-	CONNMAN_PROVIDER_STATE_READY         = 3,
-	CONNMAN_PROVIDER_STATE_DISCONNECT    = 4,
-	CONNMAN_PROVIDER_STATE_FAILURE       = 5,
+	CONNMAN_PROVIDER_STATE_ASSOCIATION   = 2,
+	CONNMAN_PROVIDER_STATE_CONNECT       = 3,
+	CONNMAN_PROVIDER_STATE_READY         = 4,
+	CONNMAN_PROVIDER_STATE_DISCONNECT    = 5,
+	CONNMAN_PROVIDER_STATE_FAILURE       = 6,
 };
 
 enum connman_provider_error {
@@ -116,7 +117,7 @@ void connman_provider_set_autoconnect(struct connman_provider *provider,
 bool connman_provider_is_split_routing(struct connman_provider *provider);
 int connman_provider_set_split_routing(struct connman_provider *provider,
 							bool split_routing);
-int connman_provider_get_family(struct connman_provider *provider);
+bool connman_provider_get_family(struct connman_provider *provider, int family);
 
 const char *connman_provider_get_driver_name(struct connman_provider *provider);
 const char *connman_provider_get_save_group(struct connman_provider *provider);
