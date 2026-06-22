@@ -172,8 +172,6 @@ int __connman_inet_get_interface_address(int index, int family, void *address);
 int __connman_inet_get_interface_ll_address(int index, int family, void *address);
 int __connman_inet_get_interface_mac_address(int index, uint8_t *mac_address);
 
-bool __connman_inet_is_any_addr(const char *address, int family);
-
 const char *__connman_inet_table2string(uint32_t table_id);
 
 #include <netinet/ip6.h>
@@ -788,6 +786,8 @@ int __connman_service_connect(struct connman_service *service,
 int __connman_service_disconnect(struct connman_service *service);
 void __connman_service_set_active_session(bool enable, GSList *list);
 void __connman_service_auto_connect(enum connman_service_connect_reason reason);
+void __connman_service_start_connect_timeout(struct connman_service *service,
+				bool restart);
 bool __connman_service_remove(struct connman_service *service);
 void __connman_service_set_hidden_data(struct connman_service *service,
 				gpointer user_data);

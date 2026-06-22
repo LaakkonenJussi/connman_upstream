@@ -30,15 +30,17 @@ extern "C" {
 
 #define VPN_FLAG_NO_TUN     1
 #define VPN_FLAG_NO_DAEMON  2
+#define VPN_FLAG_NO_AGENT   4
 
 enum vpn_state {
 	VPN_STATE_UNKNOWN       = 0,
 	VPN_STATE_IDLE          = 1,
-	VPN_STATE_CONNECT       = 2,
-	VPN_STATE_READY         = 3,
-	VPN_STATE_DISCONNECT    = 4,
-	VPN_STATE_FAILURE       = 5,
-	VPN_STATE_AUTH_FAILURE  = 6,
+	VPN_STATE_ASSOCIATION   = 2,
+	VPN_STATE_CONNECT       = 3,
+	VPN_STATE_READY         = 4,
+	VPN_STATE_DISCONNECT    = 5,
+	VPN_STATE_FAILURE       = 6,
+	VPN_STATE_AUTH_FAILURE  = 7,
 };
 
 struct vpn_driver {
